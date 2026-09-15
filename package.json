@@ -1,0 +1,30 @@
+{
+  "name": "poputchka-collector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Сборщик объявлений из публичных чатов Telegram (t.me/s/<username>) + приём сообщений из браузерного расширения. Серверная часть ТЗ docs/tz-auto-collection.md проекта Bergaff/parcel.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:local": "node local/cli.ts db-init",
+    "scan": "node local/cli.ts scan",
+    "parse": "node local/cli.ts parse",
+    "watch": "node local/cli.ts",
+    "collect": "node local/cli.ts collect",
+    "server": "node local/cli.ts server",
+    "ingest": "node local/cli.ts ingest",
+    "daemon": "node local/cli.ts daemon",
+    "fixture": "node scripts/fetch-fixture.mjs"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
