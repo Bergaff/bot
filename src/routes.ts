@@ -80,6 +80,12 @@ export interface IngestResultItem {
     source: string;
     origin: ListingOrigin;
   }>;
+  /** Дубль по смыслу (src/dedupe.ts): ids заявок, которые уже были. */
+  duplicateOf?: string[] | null;
+  /** Почему решено, что это дубль, — для лога расширения и разбора полётов. */
+  duplicateWhy?: string | null;
+  /** Заявка создана, но рядом есть похожая: модератору стоит взглянуть (kind='similar'). */
+  similarTo?: { id: string; why: string } | null;
   /** dryRun: что разобрал конвейер (заявки при этом не создаются). */
   fields?: Array<{
     type: string;
@@ -283,6 +289,11 @@ export async function runIngestBatch(
           origin: l.origin ?? 'extension',
         }));
       }
+      if (res.duplicateOf?.length) {
+        item.duplicateOf = res.duplicateOf;
+        item.duplicateWhy = res.duplicateWhy ?? null;
+      }
+      if (res.similarTo) item.similarTo = res.similarTo;
       if (dryRun && res.fields) {
         item.fields = res.fields.map((f) => ({
           type: f.type,
@@ -295,6 +306,10 @@ export async function runIngestBatch(
     } else if (res.status === 'duplicate') {
       summary.duplicate++;
       item.listingId = res.existingListingId ?? null;
+      // дубль бывает двух видов: то же сообщение (tg_seen) и то же объявление
+      // другим сообщением (src/dedupe.ts) — второй приходит с пояснением
+      item.duplicateOf = res.duplicateOf ?? (res.existingListingId ? [res.existingListingId] : null);
+      item.duplicateWhy = res.duplicateWhy ?? null;
     } else if (res.status === 'skipped') {
       summary.skipped++;
     } else {
@@ -357,7 +372,7 @@ export function registerAdminCollectRoutes(app: Hono<{ Bindings: Env }>): void {
       return c.json({ chats: await listWatchChats(c.env) });
     } catch (e) {
       if (String(e).includes('no such table')) {
-        return c.json({ chats: [], needsSetup: true, error: 'Примените миграцию 0004_ingest.sql' });
+        return c.json({ chats: [], needsSetup: true, error: 'Примените миграцию 0006_ingest.sql' });
       }
       throw e;
     }
@@ -383,7 +398,7 @@ export function registerAdminCollectRoutes(app: Hono<{ Bindings: Env }>): void {
       return c.json({ ok: true, chat });
     } catch (e) {
       if (String(e).includes('no such table')) {
-        return c.json({ error: 'Примените миграцию 0004_ingest.sql (npm run deploy)' }, 500);
+        return c.json({ error: 'Примените миграцию 0006_ingest.sql (npm run deploy)' }, 500);
       }
       throw e;
     }

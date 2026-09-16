@@ -170,7 +170,7 @@ async function renderAutoCollect(container) {
           'дубли не страшны: их отсекает tg_seen. Заявки всегда попадают в очередь модерации.',
       }),
       needsSetup
-        ? el('p', { class: 'empty-note', text: 'Нужна миграция 0004_ingest.sql: npm run deploy (или wrangler d1 migrations apply DB --remote).' })
+        ? el('p', { class: 'empty-note', text: 'Нужна миграция 0006_ingest.sql: npm run deploy (или wrangler d1 migrations apply DB --remote).' })
         : (chats.length === 0
             ? el('p', { class: 'empty-note', text: 'Чатов в обходе нет. Добавьте публичный канал или супергруппу — и нажмите «проверить сейчас».' })
             : autoCollectTable(chats)),
@@ -226,7 +226,7 @@ function originBadge(listing) {
 let adminOriginFilter = 'all';
 
 /**
- * Источник заявки. У старых записей поля origin нет (миграция 0004 добавляет
+ * Источник заявки. У старых записей поля origin нет (миграция 0006 добавляет
  * его со значением 'bot'), поэтому всё неизвестное считаем ботом.
  */
 function originOf(l) {

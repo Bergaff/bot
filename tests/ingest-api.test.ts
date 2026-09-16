@@ -164,6 +164,23 @@ describe('POST /api/ingest — контракт (ТЗ п. 4)', () => {
     expect(ext).toBeNull();
   });
 
+  it('то же объявление другим сообщением — duplicate с пояснением, заявка одна', async () => {
+    const first = await post({ messages: [msg({ messageId: 700 })] });
+    const firstBody = await first.json() as Record<string, any>;
+    const listingId = firstBody.results[0].listings[0].id;
+
+    // водитель повторил объявление на следующий день: messageId другой, tg_seen молчит
+    const res = await post({ messages: [msg({ messageId: 701, date: Math.floor(NOW / 1000) + 86400 })] });
+    const body = await res.json() as Record<string, any>;
+    expect(body.summary).toMatchObject({ received: 1, created: 0, duplicate: 1, listings: 0 });
+    expect(body.results[0]).toMatchObject({ status: 'duplicate', listingId, duplicateOf: [listingId] });
+    expect(typeof body.results[0].duplicateWhy).toBe('string');
+    expect(body.results[0].duplicateWhy.length).toBeGreaterThan(0);
+
+    const rows = (await env.DB.prepare('SELECT COUNT(*) AS n FROM listings').first()) as { n: number };
+    expect(Number(rows.n)).toBe(1);
+  });
+
   it('старые сообщения (>3 дней) отсеиваются как too_old', async () => {
     const oldDate = Math.floor(NOW / 1000) - 10 * 86400;
     const res = await post({ messages: [msg({ date: oldDate })] });

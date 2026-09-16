@@ -4,13 +4,16 @@ import { chatUrlOf, usernameOfChatId } from './links.ts';
 import { isMultiRoute, isPassengerOnly, parseTelegramMessage, worthAiCheck } from './parser.ts';
 import {
   createListing,
+  findDuplicate,
   getSeenListing,
   markSeen,
   setSeenListing,
+  touchListing,
   unmarkSeen,
   upsertChatLink,
 } from './store.ts';
 import { notifyAdmins as defaultNotifyAdmins } from './telegram.ts';
+import type { DuplicateHit } from './dedupe.ts';
 import type { Env, Listing, ListingInput, ListingOrigin, ListingSource, ParsedMessage } from './types.ts';
 import { dedupeDescription, normalizeContacts } from './util.ts';
 
@@ -24,8 +27,10 @@ import { dedupeDescription, normalizeContacts } from './util.ts';
  *
  * Порядок операций внутри ingestMessage() фиксирован ТЗ:
  *   1. длина текста → 2. возраст → 3. пассажирское → 4. markSeen (защита от дублей,
- *   ДО любых вызовов ИИ) → 5. cascade (правила → ИИ) → 6. createListing (всегда
- *   pending) → 7. notifyAdmins → 8. откат tg_seen при ошибке создания.
+ *   ДО любых вызовов ИИ) → 5. cascade (правила → ИИ) → 6. дубль по смыслу
+ *   (src/dedupe.ts: та же заявка другим сообщением → не создаём, освежаем) →
+ *   6.1 createListing (всегда pending) → 7. notifyAdmins → 8. откат tg_seen при
+ *   ошибке создания.
  *
  * Правила разбора и ИИ не переписываются: cascade() здесь — дословный перенос
  * приватной cascade() из src/telegram.ts проекта Bergaff/parcel.
@@ -68,6 +73,12 @@ export interface IngestResult {
   listings: Listing[];
   /** Для duplicate: какая заявка уже была создана по этому сообщению. */
   existingListingId?: string | null;
+  /** Дубль по смыслу (src/dedupe.ts): ids заявок, которые уже были на доске/в очереди. */
+  duplicateOf?: string[];
+  /** Почему решено, что это дубль — для логов и диагностики. */
+  duplicateWhy?: string;
+  /** Похожая, но не та же заявка: создана, модератору стоит взглянуть (kind='similar'). */
+  similarTo?: { id: string; why: string } | null;
   /** Что насобирал каскад (dryRun-предпросмотр и диагностика). */
   fields?: AiFields[];
   /** 'telegram' — правила, 'parser' — ИИ (так же, как source у заявки). */
@@ -93,6 +104,14 @@ export interface IngestOptions {
   cascade?: typeof cascade;
   notifyAdmins?: (env: Env, listing: Listing) => Promise<void>;
   createListing?: typeof createListing;
+  /**
+   * Проверка дубля по смыслу (src/dedupe.ts): то же объявление, присланное другим
+   * сообщением. По умолчанию включена; отключается, если подменили createListing
+   * (тесты) или передали null.
+   */
+  findDuplicate?: ((env: Env, input: ListingInput) => Promise<DuplicateHit<Listing> | null>) | null;
+  /** Освежить существующую заявку вместо создания дубля (published поднимается наверх доски). */
+  touchListing?: typeof touchListing;
   /** Минимальная длина текста (как в групповых сообщениях бота: < 10 — молча мимо). */
   minTextLength?: number;
   /** 'now' — для тестов с фиксированным временем. */
@@ -215,6 +234,12 @@ export async function ingestMessage(
   const runCascade = opts.cascade ?? cascade;
   const notify = opts.notifyAdmins ?? defaultNotifyAdmins;
   const create = opts.createListing ?? createListing;
+  // Дубль по смыслу ищем настоящей функцией из store, но не тогда, когда createListing
+  // подменили (тесты пишут в свою заглушку — там сравнивать не с чем).
+  const dedupe = opts.findDuplicate !== undefined
+    ? opts.findDuplicate
+    : (opts.createListing ? null : findDuplicate);
+  const touch = opts.touchListing ?? touchListing;
   const body = typeof text === 'string' ? text.trim() : '';
 
   // 1. Пустой текст — invalid; длиннее 4000 — skipped:too_long (как в боте)
@@ -292,8 +317,16 @@ export async function ingestMessage(
     return { status: 'created', listings: [], fields: list, source, parsed };
   }
 
+  // Ссылка на публичный чат сохраняем до создания заявок: она нужна для подписи
+  // источника у ДРУГИХ сообщений этого чата, даже если это оказалось дублем.
+  if (src.chatUrl && src.chatId) {
+    await upsertChatLink(env, src.chatId, src.chatUrl).catch(() => undefined);
+  }
+
   // 6. Заявки — всегда на модерацию: AUTO_APPROVE на собранные не влияет (ТЗ п. 0)
   const created: Listing[] = [];
+  const duplicates: Array<{ listing: Listing; why: string }> = [];
+  let similarTo: { id: string; why: string } | null = null;
   for (const fields of list) {
     // контакт — автор сообщения, если в самом тексте контакта нет
     // (так же работают пересылки и групповые сообщения бота)
@@ -308,6 +341,26 @@ export async function ingestMessage(
       sourceMessageId: messageId,
       origin: src.origin,
     };
+    // 6.0 Дубль по смыслу: водитель пишет «20 сентября Варшава — Минск» каждый день
+    //     новым сообщением — tg_seen это не ловит, вторая заявка не нужна.
+    if (dedupe) {
+      const hit = await dedupe(env, input).catch((e) => {
+        console.error('ingest: duplicate check failed', src.chatId, messageId, e);
+        return null;
+      });
+      if (hit && hit.kind === 'duplicate') {
+        const refreshed = await touch(env, hit.listing.id).catch(() => null);
+        const listing = refreshed ?? hit.listing;
+        duplicates.push({ listing, why: hit.why });
+        // ссылка «уже обработано» должна вести на существующую карточку
+        if (hasKey && created.length === 0 && duplicates.length === 1) {
+          await setSeenListing(env, src.chatId, messageId!, listing.id).catch(() => undefined);
+        }
+        continue;
+      }
+      if (hit && hit.kind === 'similar') similarTo = { id: hit.listing.id, why: hit.why };
+    }
+
     try {
       const listing = await create(env, input);
       created.push(listing);
@@ -315,7 +368,6 @@ export async function ingestMessage(
       // при нескольких направлениях из одного сообщения модератор по ссылке
       // «duplicate» видит первую карточку, остальные — через /api/admin/pending
       if (hasKey && created.length === 1) await setSeenListing(env, src.chatId, messageId!, listing.id);
-      if (src.chatUrl) await upsertChatLink(env, src.chatId, src.chatUrl).catch(() => undefined);
     } catch (e) {
       // 8. Откат tg_seen: сообщение должно остаться доступным для повторной обработки
       //    (если не создано ни одной заявки — иначе повтор даст дубль направления)
@@ -335,12 +387,36 @@ export async function ingestMessage(
     }
   }
 
-  // 7. Уведомление админам — на каждую созданную заявку
+  // Все направления уже есть на доске — заявку не создаём, админам не пишем.
+  if (created.length === 0) {
+    return {
+      status: 'duplicate',
+      listings: [],
+      existingListingId: duplicates[0]?.listing.id ?? null,
+      duplicateOf: duplicates.map((d) => d.listing.id),
+      duplicateWhy: duplicates[0]?.why ?? '',
+      similarTo,
+      fields: list,
+      source,
+      parsed,
+    };
+  }
+
+  // 7. Уведомление админам — на каждую созданную заявку (дубли освежены молча)
   for (const listing of created) {
     await notify(env, listing).catch((e) => console.error('ingest: notify failed', e));
   }
 
-  return { status: 'created', listings: created, fields: list, source, parsed };
+  return {
+    status: 'created',
+    listings: created,
+    fields: list,
+    source,
+    parsed,
+    duplicateOf: duplicates.length ? duplicates.map((d) => d.listing.id) : undefined,
+    duplicateWhy: duplicates.length ? duplicates[0]!.why : undefined,
+    similarTo,
+  };
 }
 
 /** Обработано ли сообщение раньше (только чтение, tg_seen не трогает). */

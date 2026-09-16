@@ -78,7 +78,7 @@ export interface ListingInput {
   sourceChat?: string | null;
   sourceChatId?: string | null;
   sourceMessageId?: number | null;
-  /** 'bot' по умолчанию — см. ListingOrigin и миграцию 0004_ingest.sql. */
+  /** 'bot' по умолчанию — см. ListingOrigin и миграцию 0006_ingest.sql. */
   origin?: ListingOrigin;
 }
 

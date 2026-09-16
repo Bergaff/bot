@@ -10,9 +10,10 @@ import {
   collectorSource,
   extensionSource,
   normalizeAt,
+  type IngestOptions,
   type IngestSource,
 } from '../src/ingest';
-import { createListing, getSeenListing } from '../src/store';
+import { createListing, getListingById, getSeenListing, updateListingStatus } from '../src/store';
 import { createLocalEnv } from '../local/sqlite-env';
 import type { Env, Listing } from '../src/types';
 import type { AiFields } from '../src/ai';
@@ -21,6 +22,8 @@ const NOW = new Date('2026-09-15T12:00:00Z');
 
 const OFFER = '25.09 Варшава — Брест, возьму посылку до 20 кг, +48 579 264 254';
 const REQUEST = 'Нужно передать документы из Кракова в Минск завтра, до 2 кг, @sergei_i';
+/** Другой маршрут, дата и контакт — чтобы не сработала дедупликация по смыслу. */
+const OFFER_OTHER = '28.09 Гродно — Варшава, возьму посылку до 15 кг, @petr_g';
 const CHATTER = 'Всем привет! Как дела?';
 const PASSENGER = 'Кто подвезёт пассажира из Гродно в Минск сегодня вечером?';
 
@@ -147,10 +150,24 @@ describe('ingestMessage: дедупликация через tg_seen', () => {
     expect(count.n).toBe(1);
   });
 
-  it('один и тот же текст из ДРУГОГО источника — не дубль (ключ = chatId+messageId)', async () => {
-    await ingestMessage(env, OFFER, src({ chatId: 'web:drivers_pl_by', messageId: 7 }), { now: NOW });
+  it('тот же текст из ДРУГОГО чата: tg_seen не срабатывает, но ловит дедупликация по смыслу', async () => {
+    const first = await ingestMessage(env, OFFER, src({ chatId: 'web:drivers_pl_by', messageId: 7 }), { now: NOW });
+    expect(first.status).toBe('created');
+
+    // ключ tg_seen другой (ext:-100555:7), а объявление то же самое — вторая заявка не нужна
     const other = await ingestMessage(env, OFFER, src({ chatId: 'ext:-100555', messageId: 7, origin: 'extension' }), { now: NOW });
-    expect(other.status).toBe('created');
+    expect(other.status).toBe('duplicate');
+    expect(other.listings).toEqual([]);
+    expect(other.duplicateOf).toEqual([first.listings[0]!.id]);
+    expect(other.existingListingId).toBe(first.listings[0]!.id);
+    expect(other.duplicateWhy!.length).toBeGreaterThan(0);
+
+    // проверку можно отключить (например, модератор знает, что это другой человек)
+    const forced = await ingestMessage(env, OFFER, src({ chatId: 'ext:-100555', messageId: 8, origin: 'extension' }), {
+      now: NOW,
+      findDuplicate: null,
+    });
+    expect(forced.status).toBe('created');
   });
 
   it('один и тот же messageId в разных чатах — не дубль', async () => {
@@ -159,11 +176,12 @@ describe('ingestMessage: дедупликация через tg_seen', () => {
     expect(other.status).toBe('created');
   });
 
-  it('без messageId (пересылка в личку) дедупликация по tg_seen не мешает', async () => {
+  it('без messageId (пересылка в личку): tg_seen молчит, повтор ловит сравнение по смыслу', async () => {
     const a = await ingestMessage(env, OFFER, src({ messageId: null }), { now: NOW });
     const b = await ingestMessage(env, OFFER, src({ messageId: null }), { now: NOW });
     expect(a.status).toBe('created');
-    expect(b.status).toBe('created');
+    expect(b.status).toBe('duplicate');
+    expect(b.existingListingId).toBe(a.listings[0]!.id);
   });
 
   it('откат tg_seen при ошибке создания: сообщение можно обработать повторно', async () => {
@@ -334,8 +352,9 @@ describe('ingestMessages: порядок обработки', () => {
     const env = createLocalEnv({ dbPath: ':memory:' });
     const order: number[] = [];
     await ingestMessages(env, [
+      // тексты разные: иначе второе «то же» объявление поймает дедупликация по смыслу
       { text: OFFER, src: src({ messageId: 300 }) },
-      { text: OFFER, src: src({ messageId: 100 }) },
+      { text: OFFER_OTHER, src: src({ messageId: 100 }) },
       { text: REQUEST, src: src({ messageId: 200 }) },
     ], {
       now: NOW,
@@ -343,6 +362,77 @@ describe('ingestMessages: порядок обработки', () => {
     });
     expect(order).toEqual([100, 200, 300]);
     env.close();
+  });
+});
+
+describe('ingestMessage: дубликаты по смыслу (src/dedupe.ts)', () => {
+  let env: Env & { close: () => void };
+  beforeEach(() => { env = createLocalEnv({ dbPath: ':memory:' }); });
+
+  /** То же объявление, но другое сообщение: так водитель пишет каждый день. */
+  const SAME_AD_OTHER_DAY = '25.09 Варшава — Брест, возьму посылку до 20 кг, +48 579 264 254';
+
+  it('то же объявление другим messageId — вторая заявка не создаётся', async () => {
+    const first = await ingestMessage(env, OFFER, src({ messageId: 1001 }), { now: NOW });
+    expect(first.status).toBe('created');
+
+    const second = await ingestMessage(env, SAME_AD_OTHER_DAY, src({ messageId: 1002 }), { now: NOW });
+    expect(second.status).toBe('duplicate');
+    expect(second.listings).toEqual([]);
+    expect(second.duplicateOf).toEqual([first.listings[0]!.id]);
+    expect(second.duplicateWhy!.length).toBeGreaterThan(0);
+
+    const count = (await env.DB.prepare('SELECT COUNT(*) AS n FROM listings').first()) as { n: number };
+    expect(count.n).toBe(1);
+    // сообщение при этом обработано: повторная доставка не будет дёргать конвейер
+    expect(await isSeen(env, 'web:drivers_pl_by', 1002)).toBe(true);
+    // ссылка «уже обработано» ведёт на существующую карточку
+    expect(await getSeenListing(env, 'web:drivers_pl_by', 1002)).toBe(first.listings[0]!.id);
+  });
+
+  it('дубль освежает опубликованную заявку — она снова наверху доски', async () => {
+    const first = await ingestMessage(env, OFFER, src({ messageId: 2001 }), { now: NOW });
+    const id = first.listings[0]!.id;
+    await updateListingStatus(env, id, 'published');
+    await env.DB.prepare("UPDATE listings SET published_at = '2020-01-01T00:00:00.000Z' WHERE id = ?").bind(id).run();
+
+    const second = await ingestMessage(env, SAME_AD_OTHER_DAY, src({ messageId: 2002 }), { now: NOW });
+    expect(second.status).toBe('duplicate');
+    const after = await getListingById(env, id);
+    expect(after?.publishedAt).not.toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('похожая, но не та же заявка (similar) — создаём и возвращаем similarTo', async () => {
+    const stub = (async () => ({
+      listing: { id: 'another-listing' } as Listing,
+      kind: 'similar' as const,
+      why: 'маршрут и дата совпали, а контакт другой',
+    })) as unknown as NonNullable<IngestOptions['findDuplicate']>;
+    const res = await ingestMessage(env, OFFER, src({ messageId: 3001 }), { now: NOW, findDuplicate: stub });
+    expect(res.status).toBe('created');
+    expect(res.listings).toHaveLength(1);
+    expect(res.similarTo).toEqual({ id: 'another-listing', why: 'маршрут и дата совпали, а контакт другой' });
+  });
+
+  it('ссылка на чат сохраняется, даже если сообщение оказалось дублем', async () => {
+    const first = await ingestMessage(env, OFFER, src({ messageId: 4001, chatUrl: 'https://t.me/drivers_pl_by' }), { now: NOW });
+    expect(first.status).toBe('created');
+    // тот же текст из ДРУГОГО публичного чата со своей ссылкой
+    const second = await ingestMessage(env, SAME_AD_OTHER_DAY, src({
+      chatId: 'web:posylki_pl_by', chatUrl: 'https://t.me/posylki_pl_by', messageId: 4002,
+    }), { now: NOW });
+    expect(second.status).toBe('duplicate');
+    const row = (await env.DB.prepare('SELECT url FROM chat_links WHERE chat_id = ?').bind('web:posylki_pl_by').first()) as { url?: string };
+    expect(row?.url).toBe('https://t.me/posylki_pl_by');
+  });
+
+  it('ошибка проверки дубля не роняет обработку — заявку создаём', async () => {
+    const boom = (async () => { throw new Error('D1 is down'); }) as unknown as NonNullable<IngestOptions['findDuplicate']>;
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await ingestMessage(env, OFFER, src({ messageId: 5001 }), { now: NOW, findDuplicate: boom });
+    errSpy.mockRestore();
+    expect(res.status).toBe('created');
+    expect(res.listings).toHaveLength(1);
   });
 });
 

@@ -34,7 +34,7 @@ npm run server                                    # HTTP API: /api/ingest + ад
 npm run daemon -- --every 900                     # обход каждые 15 мин (замена cron)
 ```
 
-`npm test` — 321 тест, `npm run typecheck` — `tsc --noEmit`.
+`npm test` — 355 тестов, `npm run typecheck` — `tsc --noEmit`.
 
 Локально D1 и KV заменяет встроенный `node:sqlite` (`local/sqlite-env.ts`), поэтому код из `src/` не знает, где он запущен: в воркере — настоящие биндинги, на вашей машине — sqlite-файл.
 
@@ -65,13 +65,21 @@ http://localhost:8790 (подробно — [`parcel/demo/README.md`](parcel/dem
                                         ▼
                        src/ingest.ts :: ingestMessage()
    1 длина текста → 2 возраст → 3 пассажирское? → 4 markSeen (tg_seen)
-   → 5 cascade(): правила (confidence ≥ 0.7) → иначе ИИ → 6 createListing(pending)
+   → 5 cascade(): правила (confidence ≥ 0.7) → иначе ИИ
+   → 6 дубль по смыслу? (src/dedupe.ts) → 6.1 createListing(pending)
    → 7 notifyAdmins → 8 откат tg_seen, если создать не удалось
 ```
 
 Порядок шагов фиксирован ТЗ. Ключевое: **`markSeen()` вызывается до любых обращений к ИИ** — дубли не тратят ни квоту, ни деньги. Если каскад вернул пустой список (болтовня), запись в `tg_seen` остаётся: повторно это сообщение не обрабатывается.
 
-Курсор `watch_chats.last_message_id` — **оптимизация, а не защита от дублей**. Если он сбросится илиextension пришлёт перекрывающееся окно, сообщения упрутся в `tg_seen` и вернутся как `duplicate` — это штатный режим.
+Дедупликация двухслойная:
+
+1. **`tg_seen`** — то же самое сообщение (ключ `chatId:messageId`). Срабатывает до каскада, поэтому повторы не тратят квоту ИИ.
+2. **`src/dedupe.ts`** — то же самое объявление, но **другим** сообщением: водитель каждый день пишет «20 сентября Варшава — Минск, возьму посылку», и каждый день это новый id. Сравнивается смысл: тип + маршрут (города после нормализации) + дата ±1 день + признак «тот же человек» (совпал контакт, автор пересылки или текст на 80%+). Такой дубль заявку **не создаёт**, а существующую освежает (`published` поднимается наверх доски). Совпадение маршрута и даты при слабом признаке даёт `similar` — заявку создаём, но возвращаем `similarTo`, чтобы модератор взглянул.
+
+`src/dedupe.ts` — **копия из `Bergaff/parcel`** (коммит `e037b3f`), где она уже работает для пересылок и формы на сайте: авто-сбор обязан вести себя так же, иначе доска заполнится одинаковыми заявками. При переносе файл не копируется — там он уже есть.
+
+Курсор `watch_chats.last_message_id` — **оптимизация, а не защита от дублей**. Если он сбросится или extension пришлёт перекрывающееся окно, сообщения упрутся в `tg_seen` и вернутся как `duplicate` — это штатный режим.
 
 ### Вариант A: обход публичных чатов
 
@@ -165,7 +173,8 @@ Origin: https://web.telegram.org
     { "chatId": "web:drivers_pl_by", "messageId": 12345, "status": "created",
       "listings": [{ "id": "6336…", "type": "offer", "fromCity": "Варшава", "toCity": "Брест",
                      "departureDate": null, "source": "telegram", "origin": "extension" }] },
-    { "chatId": "web:drivers_pl_by", "messageId": 12340, "status": "duplicate", "listingId": "a1b2…" },
+    { "chatId": "web:drivers_pl_by", "messageId": 12340, "status": "duplicate", "listingId": "a1b2…",
+      "duplicateOf": ["a1b2…"], "duplicateWhy": "тот же маршрут и дата, совпал телефон" },
     { "chatId": "ext:-100777",       "messageId": 555,   "status": "skipped",   "reason": "passenger" }
   ],
   "cursors": { "web:drivers_pl_by": 12345, "ext:-100777": 556 }
@@ -175,6 +184,8 @@ Origin: https://web.telegram.org
 `cursors` — максимальный принятый `messageId` по каждому `chatId`. Расширение **может** использовать его как локальный курсор, но обязано присылать с перекрытием: источник истины — сервер.
 
 `status` / `reason`: `created`, `duplicate`, `skipped` (`passenger`, `no_intent`, `ai_empty`, `too_old`, `too_long`, `too_short`), `invalid` (`bad_payload` — битое поле).
+
+`duplicate` бывает двух видов, и оба приходят с `listingId` уже существующей заявки: то же сообщение (`tg_seen`, без пояснения) и то же объявление другим сообщением (`src/dedupe.ts` — тогда заполнены `duplicateOf` и `duplicateWhy`). У `created` может стоять `similarTo: { id, why }` — рядом есть похожая заявка, модератору стоит взглянуть. Поля дополнительные: клиент, который их не знает, ничего не ломает.
 
 Ошибки: `400` (битое тело/поля), `401` (нет или неверный токен), `413` (> 100 сообщений), `429` (лимит, есть `Retry-After`), `503` (`INGEST_TOKEN` не задан). Тело — `{ "error": "…" }`.
 
@@ -235,12 +246,13 @@ curl -X POST https://<worker>/api/ingest \
 | `src/ingest.ts` | `ingestMessage()`, `cascade()`, `rulesFields()`, `parseMessageDate()`, источники | 1 |
 | `src/links.ts` | `listingSourceLink()` для `-100…` / `web:*` / `ext:*`, метки `origin` | 1 |
 | `src/store.ts` | `watch_chats`, `unmarkSeen()`, `countByOrigin()`, фикс `listSourceChats()` | 1 |
-| `migrations/0004_ingest.sql` | `listings.origin` + таблица `watch_chats` с курсором | 1 |
+| `migrations/0006_ingest.sql` | `listings.origin` + таблица `watch_chats` с курсором | 1 |
 | `src/routes.ts` | `POST /api/ingest`, валидация контракта, rate limit, админ-API | 2, 5 |
 | `src/server.ts` | Hono-приложение, CORS, админ-middleware, `scheduled()` с `switch (event.cron)` | 2 |
 | `src/preview-html.ts` | чистый парсер HTML-превью (без fetch и Worker API) | 4 |
 | `src/preview.ts` | `fetchPreview()`, заголовки браузера, диагностика страницы | 4 |
 | `src/collect.ts` | `collectPublicChats()`, курсор, ротация, ошибки, отчёт | 4 |
+| `src/dedupe.ts` | **копия из `parcel`** (коммит `e037b3f`): дубль по смыслу — маршрут + дата ±1 день + «тот же человек» | — |
 | `src/parser.ts`, `src/util.ts`, `src/ai.ts`, `src/types.ts` | копия из `parcel` + точечные правки (см. INTEGRATION.md) | — |
 | `src/telegram.ts` | локальная замена `formatListing`/`notifyAdmins` — в `parcel` НЕ переносится | — |
 | `parcel/app-auto-collect.js` | блок вкладки «чаты»: таблица обхода, добавление/включение/сброс курсора/проверка/удаление, отчёт последнего прогона, бейджи `origin`, фильтр очереди по источнику | 6 |
@@ -255,7 +267,7 @@ curl -X POST https://<worker>/api/ingest \
 | `extension/popup.*`, `manifest.json` | настройки, счётчики, «Проверить сервер», «Диагностика вкладки» | 3 |
 | `extension/vendor/parser.js` | бандл `src/parser.ts` (esbuild) — клиентский детект до отправки | 3 |
 | `userscript/poputchka-collector.user.js` | тот же клиент одним файлом (собирается `npm run build:ext`) | 3 |
-| `tests/` | 321 тест + фикстуры разметки, мини-DOM и мини-браузер | 1–7 |
+| `tests/` | 355 тестов + фикстуры разметки, мини-DOM и мини-браузер | 1–7 |
 
 Квоты ИИ разведены по каналам (ТЗ п. 2.4, 3.5, 4.4): `ai:day:*` — бот (300/день), `ai:collect:day:*` — сборщик, `ai:ingest:day:*` — расширение (по `COLLECT_AI_DAILY_LIMIT`, 100/день). При исчерпании своего счётчика канал продолжает разбирать правила — сбор не встаёт.
 
@@ -264,7 +276,7 @@ curl -X POST https://<worker>/api/ingest \
 ## Тесты
 
 ```bash
-npm test              # 321 тест
+npm test              # 355 тестов
 npm run typecheck
 npm run build:ext     # бандл парсера для клиента + юзерскрипт одним файлом
 ```
@@ -275,10 +287,11 @@ npm run build:ext     # бандл парсера для клиента + юзе
 | `tests/collect.test.ts` | логика курсора (первая установка — вглубь не листаем, отсечение `id <= cursor`, сортировка, отсев по возрасту), прогон: создание заявок, `origin`/`pending`, дубли при повторе и при сбросе курсора, `dryRun`, 404, `markup_changed` ×3 → авто-отключение и алерт, ротация, бюджет запросов, отчёт в KV, дефолты конфигурации |
 | `tests/ingest.test.ts` | порядок шагов конвейера, `duplicate` (каскад не вызывается), `skipped:passenger`/`no_intent`/`too_old`/`too_long`/`too_short`, откат `tg_seen` при ошибке, несколько заявок из одного сообщения, `dryRun`, счетчики квот, порядок обработки |
 | `tests/ingest-api.test.ts` | контракт `/api/ingest`: 200/400/401/413/429/503, `summary`/`results`/`cursors`, `invalid` не роняет батч, `dryRun`, CORS и preflight, админ-API `watch-chats`/`collect`/`collect/status` |
+| `tests/dedupe.test.ts` | копия тестов `parcel` для `src/dedupe.ts`: сравнение городов и дат, телефоны по последним цифрам, юзернеймы без `@` и регистра, автор пересылки, похожест текста (слова по первым 5 буквам), `duplicate` против `similar`, выбор лучшей кандидатуры |
 | `tests/sourcelink.test.ts` | `listingSourceLink()`: `web:durov`+528 → `t.me/durov/528`, `ext:-100123` → `null`, приоритет `chat_links`, карточка `formatListing` |
 | `tests/extension-core.test.ts` | клиентская логика: диапазоны настроек (60–600 с, батч ≤ 100), белый список (пустой = ничего не читаем), `web:`/`ext:` ключи, синтетический `messageId`, детект на бандле парсера и запасной по словам, возраст, лог отправленного, батчи, backoff, коды HTTP, тело запроса строго по контракту, счётчики, диагностика; бандл `vendor/parser.js` не разъехался с `src/parser.ts` |
 | `tests/extension-dom.test.ts` | чтение разметки: основная и запасные стратегии селекторов, id из атрибутов/ссылок/составных форматов, коллизии id → синтетика, сервисные сообщения, пустые узлы и повторы, `limit`, даты из `time[datetime]` и подписей («вчера», «12.09», «12 сентября», «Sep 12»), чат из URL/заголовка вкладки, нечитаемая разметка → `unreadable` |
-| `tests/admin-ui.test.ts` | блок вкладки «чаты» в мини-DOM: таблица обхода и её колонки, действия (вкл/выкл/сброс курсора/проверить сейчас/удалить) и их запросы, форма добавления чата, отчёт последнего прогона, бейджи `origin`, фильтр очереди, подсказка при неприменённой миграции 0004, ошибки API → `toast()` |
+| `tests/admin-ui.test.ts` | блок вкладки «чаты» в мини-DOM: таблица обхода и её колонки, действия (вкл/выкл/сброс курсора/проверить сейчас/удалить) и их запросы, форма добавления чата, отчёт последнего прогона, бейджи `origin`, фильтр очереди, подсказка при неприменённой миграции 0006, ошибки API → `toast()` |
 | `tests/probe.test.ts` | разведка чатов: вердикты (`добавлять` / `проверить вручную` / `не добавлять`), username из URL и `@`, пагинация `--deep`, диагнозы (404, `missing`, `blocked`, `markup_changed`, обрыв сети), мёртвый чат > 30 дней, зеркало `--base-url`, чистая функция `recommend()`, человекочитаемый отчёт |
 | `tests/monitor.test.ts` | сводка мониторинга: healthy и problems (`errors`, `disabled`, нет токена, `stale`, квота ИИ на исходе, пустой прогон, dry run), форматирование отчёта со склонениями, `fetchState` при 401/500/без URL |
 | `tests/extension-content.test.ts` | оркестратор в мини-браузере (`tests/helpers/fake-browser.ts`): один `POST` с `Bearer` и только объявлениями, счётчики и лог в storage, повторный проход пуст, чужой чат не читается, приватный чат без публичной ссылки, нарезка на батчи, `confirmMode` + клик, пауза, диагностика, 401/503/429/413/5xx/обрыв сети/битый JSON, «не могу прочитать сообщения» |

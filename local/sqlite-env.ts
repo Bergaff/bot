@@ -177,11 +177,31 @@ const MIGRATIONS_DDL = `CREATE TABLE IF NOT EXISTS _migrations (
   applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 )`;
 
+/** «Это уже применялось» — SQLite не умеет IF NOT EXISTS для колонок. */
+function isAlreadyAppliedError(e: unknown): boolean {
+  const message = String((e as Error | null)?.message ?? e);
+  return /duplicate column name|duplicate table|already exists/i.test(message);
+}
+
+/** Разбить файл миграции на предложения (нужно, чтобы перезапустить их по одному). */
+function splitStatements(sql: string): string[] {
+  return sql
+    .split(';')
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0 &&
+      chunk.split('\n').some((l) => l.trim().length > 0 && !l.trim().startsWith('--')));
+}
+
 /**
  * Применить migrations/*.sql по порядку, каждый — один раз.
- * Трекинг в таблице _migrations: в 0004 есть ALTER TABLE listings ADD COLUMN,
+ * Трекинг в таблице _migrations: в 0006 есть ALTER TABLE listings ADD COLUMN,
  * повторный прогон которого SQLite не переживёт (durable migrations wrangler
  * делает так же). Сами CREATE TABLE в миграциях — с IF NOT EXISTS.
+ *
+ * Отдельно переживаем переименование файла миграции (0004_ingest.sql →
+ * 0006_ingest.sql при подстройке под нумерацию parcel): трекинг по имени уже
+ * не совпадает, но DDL частично применён — тогда повторяем по одному
+ * предложению и пропускаем «duplicate column/table».
  */
 export function applyMigrations(db: DatabaseSyncInstance, migrationsDir: string): string[] {
   db.exec(MIGRATIONS_DDL);
@@ -192,7 +212,19 @@ export function applyMigrations(db: DatabaseSyncInstance, migrationsDir: string)
   for (const file of files) {
     const done = db.prepare('SELECT name FROM _migrations WHERE name = ?').get(file) as { name?: string } | undefined;
     if (done) continue;
-    db.exec(readFileSync(resolve(migrationsDir, file), 'utf8'));
+    const sql = readFileSync(resolve(migrationsDir, file), 'utf8');
+    try {
+      db.exec(sql);
+    } catch (e) {
+      if (!isAlreadyAppliedError(e)) throw e;
+      for (const statement of splitStatements(sql)) {
+        try {
+          db.exec(statement);
+        } catch (e2) {
+          if (!isAlreadyAppliedError(e2)) throw e2;
+        }
+      }
+    }
     db.prepare('INSERT OR IGNORE INTO _migrations (name) VALUES (?)').run(file);
     applied.push(file);
   }

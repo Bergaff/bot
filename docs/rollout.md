@@ -15,7 +15,7 @@
 
 ## 0. Чек-лист готовности (до первого шага)
 
-- [ ] Миграция `0004_ingest.sql` применена (`wrangler d1 migrations apply parcel --remote`),
+- [ ] Миграция `0006_ingest.sql` применена (`wrangler d1 migrations apply parcel --remote`),
       таблица `watch_chats` есть, у `listings` появился столбец `origin`.
 - [ ] Секреты заданы: `wrangler secret put ADMIN_API_TOKEN`, `wrangler secret put INGEST_TOKEN`
       (токен расширения можно задать позже — до его обкатки).
@@ -200,6 +200,18 @@ curl -s -X POST https://<ваш-домен>/api/admin/collect \
 3. Повторный прогон тут же даёт `duplicate` и **не** создаёт копии — это проверка
    `tg_seen`-дедупликации. Прогоните дважды подряд и сравните `totals.created`:
    во второй раз должно быть 0.
+4. Отдельно проверьте дедупликацию **по смыслу** (`src/dedupe.ts`): водитель пишет
+   «20 сентября Варшава — Минск» каждый день новым сообщением, и это разные `messageId`.
+   Вторая такая заявка создаваться не должна — существующая освежается. Проверка:
+   ```bash
+   curl -s -X POST https://<ваш-домен>/api/ingest -H "Authorization: Bearer $INGEST_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"collector":"manual-check","messages":[
+           {"chatId":"web:drivers_pl_by","messageId":910001,"text":"20.09 Варшава — Минск, возьму посылку до 20 кг, +48 579 264 254"},
+           {"chatId":"web:drivers_pl_by","messageId":910002,"text":"20.09 Варшава — Минск, возьму посылку до 20 кг, +48 579 264 254"}]}' \
+     | jq '.summary, [.results[].status]'
+   # → created 1, duplicate 1 (второй — с duplicateWhy)
+   ```
 4. Дневной лимит ИИ бота (`ai:day:*`, 300) **не изменился** — сборщик расходует свой
    счётчик (`ai:collect:day:*`). Проверьте в `GET /api/admin/collect/status` → `ai`.
 
@@ -344,6 +356,7 @@ COLLECT_MAX_FETCHES ≥ COLLECT_MAX_CHATS × (COLLECT_MAX_PAGES + 1)
 | 429 от `t.me` | слишком агрессивный обход | уменьшить `COLLECT_MAX_FETCHES`, реже cron (раз в 3–4 часа) |
 | 429 от своего `/api/ingest` (расширение) | короткий интервал опроса / большой батч | в попапе: `intervalSec` 180+, батч ≤ 20; расширение само ждёт `Retry-After` |
 | `skipped:too_old` у всех сообщений | `COLLECT_MAX_AGE_DAYS` меньше, чем активность чата | поднять до 7 (для обкатки на фикстурах — см. демо) |
+| На доске одинаковые заявки | авто-сбор обошёл `createListingSafe`/`findDuplicate` (в `parcel` эти функции уже есть) | проверить, что `ingest.ts` вызывает `findDuplicate`+`touchListing` из `store.ts`, а не голый `createListing`; см. `src/dedupe.ts` |
 | Заявок слишком много, модерация не успевает | чатов больше, чем нужно | сократить обход до 2–3 самых плотных чатов, `COLLECT_MAX_PAGES=1` |
 
 Локальная отладка без деплоя — CLI:
@@ -388,7 +401,7 @@ node local/cli.ts daemon --every 3600                   # локальная з�
    DELETE FROM tg_seen WHERE chat_id = 'web:drivers_pl_by';
    ```
 6. **Полный откат** — удалить файлы из раздела «что копировать» (`INTEGRATION.md`, раздел 0),
-   убрать cron и переменные из `wrangler.toml`. Миграция 0004 обратно не откатывается
+   убрать cron и переменные из `wrangler.toml`. Миграция 0006 обратно не откатывается
    (столбец `origin` и таблица `watch_chats` остаются) — они не мешают основному потоку:
    `origin` по умолчанию `'bot'`, пустая `watch_chats` ничего не делает.
 

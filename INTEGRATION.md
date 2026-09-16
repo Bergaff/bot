@@ -10,12 +10,13 @@
 
 | Отсюда | Куда в `parcel` | Комментарий |
 |---|---|---|
-| `src/ingest.ts` | `src/ingest.ts` | новый файл, без правок |
+| `src/ingest.ts` | `src/ingest.ts` | новый файл, без правок: `findDuplicate`/`touchListing` он берёт из вашего `store.ts` — там они уже есть |
+| `src/dedupe.ts` | ✂️ не копировать | это копия вашего `src/dedupe.ts` (коммит `e037b3f`); нужна только для автономного запуска скраппера |
 | `src/links.ts` | `src/links.ts` | новый файл; `listingSourceLink()` переезжает сюда из `telegram.ts` |
 | `src/preview.ts`, `src/preview-html.ts` | как есть | чистый код, Worker API не использует |
 | `src/collect.ts` | `src/collect.ts` | ✂️ заменить `sendTextToAdmins` на ваш `sendText`/`notifyAdmins` (шаг 3) |
 | `src/routes.ts` | `src/routes.ts` | новый файл |
-| `migrations/0004_ingest.sql` | `migrations/0004_ingest.sql` | как есть |
+| `migrations/0006_ingest.sql` | `migrations/0006_ingest.sql` | как есть |
 | `src/store.ts` | ✂️ только дописать | в вашем `store.ts` уже всё есть — добавьте блок «Авто-сбор» из нашего файла и 3 точечные правки (шаг 2) |
 | `src/ai.ts` | ✂️ только дописать | добавить счётчики квот по каналам (шаг 2) |
 | `src/types.ts` | ✂️ только дописать | новые переменные `Env`, `ListingOrigin`, `origin` в `ListingInput` |
@@ -29,9 +30,23 @@
 | `docs/ci/ci.yml`, `docs/ci/monitor.yml` | ✂️ `.github/workflows/` | скопировать вручную: бот песочницы не имеет права `workflows` (`docs/ci/README.md`) |
 | `parcel/demo/` | не копировать | демо-панель для проверки UI до правки прод-файла |
 | `local/`, `scripts/` (остальное), `tests/fixtures/` | не копировать | локальный CLI, sqlite-замена D1/KV, зеркало `t.me/s/` |
-| `tests/*.test.ts` | скопировать все | ✂️ в `tests/collect.test.ts` и `tests/ingest*.test.ts` заменить `createLocalEnv()` из `local/sqlite-env.ts` на вашу mock-`env` (или оставить sqlite — в воркер он не попадёт) |
+| `tests/*.test.ts` (кроме `dedupe.test.ts`) | скопировать все | ✂️ в `tests/collect.test.ts` и `tests/ingest*.test.ts` заменить `createLocalEnv()` из `local/sqlite-env.ts` на вашу mock-`env` (или оставить sqlite — в воркер он не попадёт) |
 
-Проверить, что ваши `parser.ts`/`util.ts` не разъехались с нашими копиями:
+### 0.1 Состояние `parcel`, под которое это написано
+
+Проверено на `arena/01a0a5c0-parcel`, коммит `e037b3f` (16.09.2026, «Без «ИИ-разбора» в
+объявлениях и без дублей при повторных пересылках»):
+
+| Что там появилось | Что это значит для переноса |
+|---|---|
+| `src/dedupe.ts`, `store.findDuplicate()/touchListing()/createListingSafe()` | Наш `ingest.ts` уже вызывает `findDuplicate()` + `touchListing()` — авто-сбор не плодит одинаковые заявки («еду 20 сентября» каждый день новым сообщением). Копировать `src/dedupe.ts` **не нужно**, он у вас есть; наш — та же копия |
+| `migrations/0005_matches.sql` | Номер 0005 занят, поэтому наша миграция называется `0006_ingest.sql` — кладётся как есть |
+| `src/match.ts`, `src/seo-routes.ts`, `src/og.ts` | Не пересекаются с авто-сбором; `store.ts` и `types.ts` из-за них ушли вперёд — поэтому их **дописываем**, а не заменяем |
+| Пометка «ИИ-разбор» убрана из карточек | Наш блок этапа 6 её не возвращает: `originBadge()` показывает только источник (бот/сборщик/расширение) |
+| `/api/admin/listings` аннотирует pending бейджем `duplicate` | Наш фильтр очереди по `origin` и бейдж источника с этим не конфликтуют: они про разные поля (`origin` и `duplicate`) |
+
+Проверить, что ваши `parser.ts`/`util.ts` не разъехались с нашими копиями
+(на `e037b3f` совпадали байт-в-байт, кроме `.ts` в импортах):
 
 ```bash
 git clone --depth 1 -b arena/01a0a5c0-parcel https://github.com/Bergaff/parcel /tmp/parcel
@@ -43,7 +58,7 @@ diff /tmp/parcel/src/util.ts   src/util.ts
 
 ## 1. Этап 1 — общий конвейер
 
-### 1.1 `migrations/0004_ingest.sql`
+### 1.1 `migrations/0006_ingest.sql`
 
 Скопировать как есть: `ALTER TABLE listings ADD COLUMN origin TEXT NOT NULL DEFAULT 'bot'` (без `CHECK` — значения контролирует код) + `CREATE TABLE IF NOT EXISTS watch_chats (…)`. Применяется штатно: `npm run deploy`.
 
@@ -68,6 +83,9 @@ WHERE l.source_chat_id IS NOT NULL
   AND (l.source_chat_id LIKE '-%' OR l.source_chat_id LIKE 'web:%' OR l.source_chat_id LIKE 'ext:%')
 ```
 
+- ✂️ блок «Дубликаты по смыслу» (`findDuplicateCandidates`, `findDuplicate`, `touchListing`,
+  `createListingSafe`) из нашего `store.ts` **не переносить** — в `parcel` он уже есть
+  (коммит `e037b3f`), а у нас лежит только для автономного запуска;
 - дописать из нашего `store.ts`: `unmarkSeen()`, `countByOrigin()`, `getIngestDailyStats()`, `bumpIngestDailyStats()` и весь блок `watch_chats` (`WatchChat`, `addWatchChat`, `patchWatchChat`, `deleteWatchChat`, `dueWatchChats`, `markWatchChecked`, `markWatchError`, `WATCH_MAX_ERRORS`).
 
 > Курсор в `markWatchChecked()` двигается через `CASE`, а не `MAX(?, last_message_id)`: скалярный `MAX` в SQLite возвращает `NULL`, если любой аргумент `NULL`, — на первом прогоне курсор остался бы не установленным.
@@ -200,11 +218,13 @@ wrangler secret put INGEST_TOKEN
 выше по файлу; конфликтов имён нет — это проверяет `tests/admin-ui.test.ts`
 (блок прогоняется в vm вместе с настоящими помощниками parcel).
 
-Дальше четыре точечные правки в `app.js`.
+Дальше четыре точечные правки в `app.js`. Номера строк — для коммита `e037b3f`
+(1297 строк в `public/app.js`); ищите по коду, а не по номеру.
 
-### Правка 1 — блок авто-сбора на вкладке «чаты» (`renderAdminChats()`, ~L789)
+### Правка 1 — блок авто-сбора на вкладке «чаты» (`renderAdminChats()`, L813)
 
-В конце `try`, сразу после цикла `for (const ch of chats) { … }`:
+В конце `try`, сразу после цикла `for (const ch of chats) { … }` (он закрывается на ~L881,
+перед `} catch {`):
 
 ```js
     // ---- авто-сбор публичных чатов (ТЗ п. 3.8) ----
@@ -214,20 +234,29 @@ wrangler secret put INGEST_TOKEN
 Блок сам рисует таблицу обхода (username, тип, вкл/выкл, курсор, последняя проверка,
 найдено/создано/отсеяно, последняя ошибка), кнопки «включить/выключить», «сбросить курсор»,
 «проверить сейчас», «удалить», форму добавления чата и раскрывающийся «Отчёт последнего
-прогона и статус источников» (`GET /api/admin/collect/status`). Если миграция 0004 не
+прогона и статус источников» (`GET /api/admin/collect/status`). Если миграция 0006 не
 применена, вместо таблицы показывается подсказка об этом.
 
-### Правка 2 — бейдж источника в карточке модерации (`adminCard()`, ~L587)
+### Правка 2 — бейдж источника в карточке модерации (`adminCard()`, L610)
 
 ```diff
+ function adminCard(l, mode = 'pending') {
+   const meta = [
+     …
 -    el('span', { class: 'src' }, [sourceContent(l)]),
 +    el('span', { class: 'src' }, [originBadge(l), sourceContent(l)]),
+   ];
 ```
 
-`originBadge()` возвращает `null` для заявок из бота (обычный источник, бейдж не нужен)
-и подписи «сборщик» / «расширение» — для собранных автоматически.
+⚠️ Такая же строка есть дважды: L242 — карточка на публичной доске, L610 — `adminCard()`.
+Правим **только вторую**: посетителям сайта источник заявки не нужен.
 
-### Правка 3 — фильтр очереди по источнику (`loadAdmin()`, ~L755)
+`originBadge()` возвращает `null` для заявок из бота (обычный источник, бейдж не нужен)
+и подписи «сборщик» / «расширение» — для собранных автоматически. Уже существующий
+`duplicateNote(l)` («♻️ Это повтор» / «⚠️ Похоже на дубль») не трогаем — он про другое:
+про дубликаты по смыслу, которые рисует ваш `dedupe.ts`.
+
+### Правка 3 — фильтр очереди по источнику (`loadAdmin()`, L761; `const { items }` — L790)
 
 ```diff
 -    const { items } = await res.json();
@@ -246,11 +275,11 @@ wrangler secret put INGEST_TOKEN
 +    }
 ```
 
-Фильтр клиентский: поле `origin` приходит в каждой заявке после миграции 0004, а счётчики
+Фильтр клиентский: поле `origin` приходит в каждой заявке после миграции 0006, а счётчики
 на кнопках («все · 12», «бот · 7», «сборщик · 4», «расширение · 1») считаются по тому же
 списку, что уже загружен. `$('#admin-count`) остаётся про всю очередь — до фильтрации.
 
-### Правка 4 — ссылка на источник для ключей авто-сбора (`sourceLinkUrl()`, ~L118)
+### Правка 4 — ссылка на источник для ключей авто-сбора (`sourceLinkUrl()`, L120)
 
 ```diff
  function sourceLinkUrl(l) {
@@ -357,9 +386,13 @@ npm run db:local && npm run dev           # локальная D1 + воркер
 1. `POST /api/admin/collect` с `dryRun: true` → отчёт, в базе ничего не появилось.
 2. Тот же вызов без `dryRun` → заявки в `pending`, `origin = 'collector'`, в карточке модератора ссылка «исходное сообщение» ведёт на `t.me/<username>/<id>`.
 3. Повторный прогон → `duplicate`, вторая заявка не создана.
+3.1. То же объявление **другим** `messageId` (водитель повторяет его каждый день) →
+   `duplicate` с `duplicateOf`/`duplicateWhy`, заявка в базе одна, а опубликованная
+   освежается (`published_at` обновлён). Если у вас это не так — `ingest.ts` вызывает
+   голый `createListing()` вместо `findDuplicate()` + `touchListing()`.
 4. `curl` батча из 3 сообщений (дубль / пассажирское / объявление) → `summary { created: 1, duplicate: 1, skipped: 1 }`.
 5. `dryRun: true` от расширения → заявок нет, следующий обычный запрос создаёт заявку.
 6. 61-й запрос за час → `429` с `Retry-After`.
 7. Preflight `OPTIONS` с `Origin: https://web.telegram.org` → `204` + заголовки CORS.
 8. Дневной лимит ИИ бота (`ai:day:*`) не изменился после прогона сборщика.
-9. `npm run deploy` применил миграцию 0004 без ручной правки базы.
+9. `npm run deploy` применил миграцию 0006 без ручной правки базы.

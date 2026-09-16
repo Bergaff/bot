@@ -162,5 +162,5 @@ curl -X POST https://pop-utka.app/api/ingest \
 
 Папка `extension/` (и `userscript/`) копируется в репозиторий `parcel` **как есть** —
 это не код воркера, в сборку Worker она не входит. Серверная сторона приёма
-(`POST /api/ingest`, миграция `0004_ingest.sql`, квоты ИИ) описана в `INTEGRATION.md`
+(`POST /api/ingest`, миграция `0006_ingest.sql`, квоты ИИ) описана в `INTEGRATION.md`
 в корне этого репозитория.

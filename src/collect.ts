@@ -605,7 +605,7 @@ export async function countProblemChats(env: Env): Promise<number> {
     ).first()) as { n?: number } | null;
     return Number(row?.n ?? 0);
   } catch {
-    return 0; // таблицы watch_chats ещё нет (миграция 0004 не применена)
+    return 0; // таблицы watch_chats ещё нет (миграция 0006 не применена)
   }
 }
 

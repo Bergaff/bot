@@ -515,10 +515,10 @@ describe('отчёт последнего прогона и статус ист�
 });
 
 describe('крайние состояния блока', () => {
-  it('нет миграции 0004 — понятная подсказка вместо пустой таблицы', async () => {
+  it('нет миграции 0006 — понятная подсказка вместо пустой таблицы', async () => {
     const ui = createAdminUi({ watchChats: { needsSetup: true } });
     const box = await renderBlock(ui);
-    expect(box.textContent).toContain('Нужна миграция 0004_ingest.sql');
+    expect(box.textContent).toContain('Нужна миграция 0006_ingest.sql');
     expect(queryAll(box, 'table')).toHaveLength(0);
   });
 

@@ -118,7 +118,21 @@ curl -s -X POST http://localhost:8790/api/ingest \
 
 Заявка появится в очереди с бейджем «расширение» и **без** ссылки на источник (приватный чат).
 
-9. **Сводка мониторинга** (этап 7) против демо:
+9. **Дедупликация по смыслу** (`src/dedupe.ts`, копия из parcel): одно и то же объявление
+   двумя разными сообщениями — вторая заявка не создаётся, существующая освежается:
+
+```bash
+curl -s -X POST http://localhost:8790/api/ingest \
+  -H "Authorization: Bearer demo-ingest-token" -H 'Content-Type: application/json' \
+  -d '{"collector":"manual-check","messages":[
+        {"chatId":"web:drivers_pl_by","messageId":910001,"text":"20.09 Варшава — Минск, возьму посылку до 20 кг, +48 579 264 254"},
+        {"chatId":"web:drivers_pl_by","messageId":910002,"text":"20.09 Варшава — Минск, возьму посылку до 20 кг, +48 579 264 254"}]}' \
+  | jq '.summary, [.results[] | {messageId, status, duplicateWhy}]'
+# summary: created 1, duplicate 1
+# 910002 → duplicate, «тот же человек (+48 579 264 254), тот же маршрут Варшава → Минск, дата та же (2026-09-20)»
+```
+
+10. **Сводка мониторинга** (этап 7) против демо:
 
 ```bash
 node scripts/collect-report.mjs --url http://localhost:8790 --token demo-admin-token

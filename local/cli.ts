@@ -160,7 +160,7 @@ async function cmdDbInit(args: Args): Promise<number> {
   line(`БД: ${DB_PATH}`);
   line(`Таблицы: ${tables.map((t) => t.name).join(', ')}`);
   const cols = (await e.DB.prepare('PRAGMA table_info(listings)').all()).results as Array<{ name: string }>;
-  line(`listings.origin: ${cols.some((c) => c.name === 'origin') ? 'есть (миграция 0004 применена)' : 'НЕТ'}`);
+  line(`listings.origin: ${cols.some((c) => c.name === 'origin') ? 'есть (миграция 0006 применена)' : 'НЕТ'}`);
   e.close();
   return 0;
 }

@@ -1,4 +1,6 @@
 import type { Env, ListFilters, Listing, ListingInput, ListingOrigin, ListingStatus } from './types.ts';
+import type { DedupeSubject, DuplicateHit, DuplicateKind } from './dedupe.ts';
+import { pickDuplicate } from './dedupe.ts';
 import { normalizeContacts } from './util.ts';
 
 function mapRow(row: Record<string, unknown>): Listing {
@@ -388,7 +390,7 @@ export async function getCounts(env: Env, f: ListFilters): Promise<{ offer: numb
 /* Авто-сбор: watch_chats (вариант A) и служебные счётчики              */
 /* ------------------------------------------------------------------ */
 
-/** Чат, который обходит серверный сборщик (таблица watch_chats, миграция 0004). */
+/** Чат, который обходит серверный сборщик (таблица watch_chats, миграция 0006). */
 export interface WatchChat {
   /** 'web:<username>' — он же source_chat_id заявок и ключ tg_seen. */
   id: string;
@@ -604,7 +606,7 @@ export async function countByOrigin(env: Env): Promise<Record<ListingOrigin, num
       if (key in out) out[key] = Number(row.n ?? 0);
     }
   } catch {
-    // колонки origin ещё нет (миграция 0004 не применена) — считаем всё ботом
+    // колонки origin ещё нет (миграция 0006 не применена) — считаем всё ботом
   }
   return out;
 }
@@ -632,4 +634,97 @@ export async function bumpIngestDailyStats(env: Env, messages: number, created: 
     JSON.stringify({ messages: cur.messages + messages, created: cur.created + created }),
     { expirationTtl: 2 * 86400 }
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* Дубликаты по смыслу — КОПИЯ блока из src/store.ts Bergaff/parcel     */
+/* ------------------------------------------------------------------ */
+/* При переносе в parcel НЕ копировать: эти функции там уже есть (коммит e037b3f).
+   Здесь они нужны, чтобы standalone-скраппер вёл себя как прод: tg_seen ловит
+   повторы одного сообщения, а createListingSafe — повторяющиеся по смыслу
+   объявления («еду 20 сентября Варшава — Минск» каждый день новым сообщением). */
+
+/* Дубликаты: одно и то же объявление, присланное несколько раз         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Кандидаты в дубликаты: тот же тип и дата выезда рядом (±1 день), статус
+ * живой (на модерации, на доске или в архиве). Маршрут, контакты и текст
+ * сравнивает src/dedupe.ts — там города нормализуются, а телефоны сверяются
+ * по последним цифрам, поэтому в SQL эти условия не унести.
+ */
+export async function findDuplicateCandidates(env: Env, input: DedupeSubject): Promise<Listing[]> {
+  const date = input.departureDate ?? null;
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings
+      WHERE status IN ('pending', 'published', 'expired')
+        AND type = ?
+        AND (? IS NULL OR departure_date IS NULL
+             OR ABS(julianday(departure_date) - julianday(?)) <= 1)
+      ORDER BY (status = 'published') DESC, COALESCE(published_at, created_at) DESC
+      LIMIT 200`
+  ).bind(input.type, date, date).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/**
+ * Есть ли уже такая заявка: 'duplicate' — уверенно та же (не создаём вторую),
+ * 'similar' — похожая (создаём, но модератора предупредим).
+ */
+export async function findDuplicate(
+  env: Env,
+  input: DedupeSubject
+): Promise<DuplicateHit<Listing> | null> {
+  const candidates = await findDuplicateCandidates(env, input);
+  return pickDuplicate(candidates, input);
+}
+
+/**
+ * Освежить существующую заявку вместо создания дубля: published поднимается
+ * наверх доски (повторное «еду 20 сентября» снова свежее), pending остаётся
+ * в очереди модерации, архив не трогаем — его вернул туда модератор или дата.
+ */
+export async function touchListing(env: Env, id: string): Promise<Listing | null> {
+  const listing = await getListingById(env, id);
+  if (!listing) return null;
+  if (listing.status === 'published') {
+    await env.DB.prepare(
+      "UPDATE listings SET published_at = datetime('now') WHERE id = ?"
+    ).bind(id).run();
+  }
+  return getListingById(env, id);
+}
+
+/**
+ * Создать заявку, но не плодить дубликаты: если такая уже есть — вернуть её
+ * (и освежить, если она на доске). Через неё идут все источники: пересылки,
+ * сообщения в чатах, мастер /post и форма на сайте.
+ */
+export async function createListingSafe(
+  env: Env,
+  input: ListingInput,
+  opts: { force?: boolean } = {}
+): Promise<{
+  listing: Listing;
+  created: boolean;
+  duplicateOf: Listing | null;
+  kind: DuplicateKind | null;
+  why: string;
+}> {
+  const hit = await findDuplicate(env, input);
+  // force — заявку создаём в любом случае (например, /post человек заполнил сам),
+  // но сведения о дубле возвращаем: модератор увидит предупреждение.
+  if (hit && hit.kind === 'duplicate' && !opts.force) {
+    const refreshed = await touchListing(env, hit.listing.id);
+    const listing = refreshed ?? hit.listing;
+    return { listing, created: false, duplicateOf: listing, kind: 'duplicate', why: hit.why };
+  }
+  const listing = await createListing(env, input);
+  return {
+    listing,
+    created: true,
+    duplicateOf: hit ? hit.listing : null,
+    kind: hit ? hit.kind : null,
+    why: hit ? hit.why : '',
+  };
 }

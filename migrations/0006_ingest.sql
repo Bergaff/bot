@@ -1,3 +1,7 @@
+-- Нумерация: 0005 в Bergaff/parcel занят под matches (src/match.ts), поэтому файл
+-- сразу называется 0006 — при переносе его кладут в parcel/migrations/ как есть,
+-- и `wrangler d1 migrations apply` не путается в порядке. В этом standalone-репозитории
+-- 0005 просто нет: локальный раннер (local/sqlite-env.ts) применяет файлы по именам.
 -- Авто-сбор объявлений без добавления бота в чаты (ТЗ docs/tz-auto-collection.md, п. 2.2).
 --
 -- 1) listings.origin — ОТКУДА пришла заявка:
