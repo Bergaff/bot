@@ -18,7 +18,7 @@ export class FakeNode {
   private ownText = '';
   style: Record<string, string> = {};
   /** обработчики, чтобы тесты могли «кликнуть» по кнопке панели */
-  handlers: Record<string, Array<() => void>> = {};
+  handlers: Record<string, Array<(ev: any) => void>> = {};
 
   constructor(tagName = 'div', opts: { className?: string; attrs?: Record<string, string>; text?: string } = {}) {
     this.tagName = tagName.toUpperCase();
@@ -27,8 +27,14 @@ export class FakeNode {
     if (opts.text !== undefined) this.text = opts.text;
   }
 
-  append(...nodes: FakeNode[]): this {
-    for (const n of nodes) { n.parent = this; this.children.push(n); }
+  /** Как Element.append: строки превращаются в текст, null/undefined пропускаются. */
+  append(...nodes: Array<FakeNode | string | null | undefined>): this {
+    for (const n of nodes) {
+      if (n === null || n === undefined) continue;
+      const child = typeof n === 'string' ? new FakeNode('#text', { text: n }) : n;
+      child.parent = this;
+      this.children.push(child);
+    }
     return this;
   }
 
@@ -54,20 +60,25 @@ export class FakeNode {
   appendChild(node: FakeNode): FakeNode { return this.append(node); }
 
   /** Как Element.replaceChildren: очистить и вложить новое. */
-  replaceChildren(...nodes: FakeNode[]): void {
+  replaceChildren(...nodes: Array<FakeNode | string | null | undefined>): void {
     for (const c of this.children) c.parent = null;
     this.children = [];
     this.append(...nodes);
   }
 
-  addEventListener(type: string, fn: () => void): void {
+  addEventListener(type: string, fn: (ev: any) => void): void {
     (this.handlers[type] ||= []).push(fn);
   }
 
   /** Вызвать обработчики события (клик по кнопке в тестах). */
   dispatch(type: string): void {
-    for (const fn of this.handlers[type] || []) fn();
+    const event = { type, target: this, currentTarget: this, preventDefault() {}, stopPropagation() {} };
+    for (const fn of this.handlers[type] || []) fn(event);
   }
+
+  /** input.value / select.value в тестах. */
+  get value(): string { return this.ownText; }
+  set value(v: string) { this.ownText = String(v ?? ''); }
 
   getAttribute(name: string): string | null {
     const key = name === 'className' ? 'class' : name;
@@ -211,4 +222,29 @@ export function bubble(opts: {
 export function bubblesList(messages: FakeNode[]): FakeNode {
   const root = new FakeNode('div', { className: 'bubbles' });
   return root.append(...messages);
+}
+
+/**
+ * Подобие `document`: body + documentElement, createElement, getElementById,
+ * querySelector(All). Хватает и для чтения ленты (dom.cjs), и для панели/админки.
+ */
+export class FakeDocument {
+  readonly documentElement = new FakeNode('html');
+  readonly body: FakeNode;
+  title = '';
+
+  constructor(page: FakeNode = new FakeNode('div')) {
+    this.body = new FakeNode('body');
+    this.body.append(page);
+  }
+
+  createElement(tag: string): FakeNode { return new FakeNode(tag); }
+  createTextNode(text: string): FakeNode { return new FakeNode('#text', { text }); }
+
+  getElementById(id: string): FakeNode | null {
+    return queryAll(this.documentElement, `#${id}`)[0] ?? queryAll(this.body, `#${id}`)[0] ?? null;
+  }
+
+  querySelector(selector: string): FakeNode | null { return this.body.querySelector(selector); }
+  querySelectorAll(selector: string): FakeNode[] { return this.body.querySelectorAll(selector); }
 }

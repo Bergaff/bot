@@ -62,3 +62,13 @@ ARCHIVE_CRON=0 21 * * *
 
 # Путь к локальной sqlite-базе (замена D1/KV)
 COLLECT_DB=.data/collector.db
+
+# Зеркало веб-превью вместо https://t.me/s — для отладки без интернета:
+#   node local/mock-tme.mjs           → COLLECT_PREVIEW_BASE=http://127.0.0.1:8899/s
+#   node parcel/demo/server.mjs       → COLLECT_PREVIEW_BASE=http://127.0.0.1:8790/mirror/s
+# В воркере задавать не нужно (там всегда настоящий t.me).
+COLLECT_PREVIEW_BASE=
+
+# То же для Bot API и DeepSeek (мок-серверы из tests/)
+TG_API_BASE=
+AI_BASE_URL=

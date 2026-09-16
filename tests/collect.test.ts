@@ -161,6 +161,32 @@ describe('collectPublicChats: прогон по watch_chats', () => {
     expect(stored?.errorCount).toBe(0);
   });
 
+  it('COLLECT_PREVIEW_BASE: прогон идёт через локальное зеркало (обкатка без t.me)', async () => {
+    const mirror = createLocalEnv({
+      dbPath: ':memory:',
+      vars: { COLLECT_ENABLED: '1', COLLECT_PREVIEW_BASE: 'http://127.0.0.1:8899/s' },
+    });
+    await addWatchChat(mirror, { username: 'drivers_pl_by', kind: 'supergroup' });
+    const report = await collectPublicChats(mirror, collectOpts);
+
+    expect(fetches[0]).toBe('http://127.0.0.1:8899/s/drivers_pl_by');
+    expect(fetches.every((u) => u.startsWith('http://127.0.0.1:8899/s/'))).toBe(true);
+    expect(report.chats[0]!.status).toBe('ok');
+    expect(report.chats[0]!.created).toBeGreaterThan(0);
+    mirror.close();
+  });
+
+  it('явный baseUrl важнее COLLECT_PREVIEW_BASE', async () => {
+    const mirror = createLocalEnv({
+      dbPath: ':memory:',
+      vars: { COLLECT_ENABLED: '1', COLLECT_PREVIEW_BASE: 'http://127.0.0.1:8899/s' },
+    });
+    await addWatchChat(mirror, { username: 'durov', kind: 'channel' });
+    await collectPublicChats(mirror, { ...collectOpts, baseUrl: 'https://t.me/s' });
+    expect(fetches[0]).toBe('https://t.me/s/durov');
+    mirror.close();
+  });
+
   it('заявки созданы с origin=collector, status=pending и ссылкой на чат', async () => {
     await addWatchChat(env, { username: 'drivers_pl_by', kind: 'supergroup' });
     await collectPublicChats(env, collectOpts);

@@ -70,11 +70,24 @@ export function previewUrl(username: string, before?: number | null, baseUrl = '
 }
 
 /** Признаки «чата нет / превью недоступно» вместо списка сообщений. */
+/**
+ * Признаки страницы-заглушки «чат не найден» вместо превью.
+ *
+ * ВАЖНО: `tgme_page_wrap` и `tgme_page_background` есть и у ЖИВОЙ страницы
+ * t.me/s/<username>, поэтому по ним отличить заглушку нельзя. Иначе любая
+ * смена разметки (контейнеры на месте, а сообщения не разобрались)диагностировалась бы
+ * как «чат удалён» — и collect.ts сразу выключал бы чат вместо трёх попыток
+ * с алертом, как при markup_changed.
+ */
 export function looksLikeMissingChannel(html: string): boolean {
   if (!html) return false;
-  return /If you have <strong>Telegram<\/strong>, you can contact/i.test(html) ||
-    /tgme_(?:page|notfound|error)/i.test(html) ||
-    /can&#39;t be found|не найден|does not exist/i.test(html);
+  if (/If you have <strong>Telegram<\/strong>, you can contact/i.test(html)) return true;
+  if (/tgme_(?:notfound|error)/i.test(html)) return true;
+  if (/can&#39;t be found|can't be found|не найден|does not exist/i.test(html)) return true;
+  // заглушка рисуется блоками tgme_page_title/tgme_page_description,
+  // а у живой страницы превью их нет (зато есть контейнеры сообщений)
+  if (/tgme_page_(?:title|description)/i.test(html) && !/tgme_widget_message/i.test(html)) return true;
+  return false;
 }
 
 /** Признаки капчи/бан-стены (Cloudflare и подобное) — не надо считать их «сменой разметки». */
@@ -86,6 +99,16 @@ export function looksLikeBlocked(html: string): boolean {
 /** Похоже ли на настоящую страницу превью (есть контейнеры сообщений). */
 export function looksLikePreviewMarkup(html: string): boolean {
   return /tgme_widget_message/i.test(html ?? '');
+}
+
+/**
+ * Есть ли на странице СОДЕРЖИМОЕ сообщений (текст, дата, data-post), а не только
+ * пустые обёртки. Нужно, чтобы отличить «чат пустой» от «разметка изменилась и
+ * разбор сломался»: во втором случае collect.ts делает три попытки и шлёт алерт,
+ * а в первом — спокойно продолжает обход.
+ */
+export function looksLikeMessagePayload(html: string): boolean {
+  return /tgme_widget_message_text|tgme_widget_message_date|data-post="/i.test(html ?? '');
 }
 
 /**
@@ -103,6 +126,9 @@ export function diagnosePage(page: { status: number; html: string; messages: Pre
   if (looksLikeMissingChannel(page.html)) return 'missing';
   if (looksLikeBlocked(page.html)) return 'blocked';
   if (!looksLikePreviewMarkup(page.html)) return 'markup_changed';
+  // обёртки и содержимое на месте, но ничего не разобрали → сломался парсер,
+  // а не «пустой чат» (у пустого канала нет ни текстов, ни data-post)
+  if (looksLikeMessagePayload(page.html)) return 'markup_changed';
   return 'empty';
 }
 

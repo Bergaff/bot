@@ -22,7 +22,12 @@
 | `src/server.ts` | ✂️ не копировать | в `parcel` уже есть `src/index.ts` — перенести из него 3 вещи (шаг 4) |
 | `src/telegram.ts` | ✂️ не копировать | это локальная замена ваших `formatListing`/`notifyAdmins` |
 | `src/parser.ts`, `src/util.ts` | ✂️ не копировать | у вас свои, идентичные |
-| `local/`, `scripts/`, `tests/fixtures/` | не копировать | локальный CLI и sqlite-замена D1/KV |
+| `scripts/probe-chats.mjs` | `scripts/probe-chats.mjs` | как есть: разведка чатов перед добавлением (этап 7) |
+| `scripts/collect-report.mjs` | `scripts/collect-report.mjs` | как есть: сводка состояния для мониторинга (этап 7) |
+| `parcel/app-auto-collect.js` | ✂️ вставить в `public/app.js` | не отдельным файлом — `app.js` грузится как модуль (раздел 4) |
+| `docs/rollout.md` | `docs/rollout.md` | runbook обкатки; пути к скриптам после переноса не меняются |
+| `parcel/demo/` | не копировать | демо-панель для проверки UI до правки прод-файла |
+| `local/`, `scripts/` (остальное), `tests/fixtures/` | не копировать | локальный CLI, sqlite-замена D1/KV, зеркало `t.me/s/` |
 | `tests/*.test.ts` | скопировать все | ✂️ в `tests/collect.test.ts` и `tests/ingest*.test.ts` заменить `createLocalEnv()` из `local/sqlite-env.ts` на вашу mock-`env` (или оставить sqlite — в воркер он не попадёт) |
 
 Проверить, что ваши `parser.ts`/`util.ts` не разъехались с нашими копиями:
@@ -187,29 +192,107 @@ wrangler secret put INGEST_TOKEN
 
 ## 4. Этап 6 — админ-панель (`public/app.js`)
 
-Готовый блок: [`parcel/app-auto-collect.js`](parcel/app-auto-collect.js). Вставить в конец `app.js` и подключить:
+`public/app.js` подключается как `type="module"`, поэтому отдельным `<script>` блок не
+подсоединить: содержимое [`parcel/app-auto-collect.js`](parcel/app-auto-collect.js)
+**вставляется в конец `app.js`**. Все помощники, которые он использует (`el()`, `$()`,
+`toast()`, `adminApi()`, `sourceContent()`, `contactInfo()`, `fmtDate()`), уже объявлены
+выше по файлу; конфликтов имён нет — это проверяет `tests/admin-ui.test.ts`
+(блок прогоняется в vm вместе с настоящими помощниками parcel).
+
+Дальше четыре точечные правки в `app.js`.
+
+### Правка 1 — блок авто-сбора на вкладке «чаты» (`renderAdminChats()`, ~L789)
+
+В конце `try`, сразу после цикла `for (const ch of chats) { … }`:
 
 ```js
-async function renderAdminChats() {
-  const listEl = $('#admin-list');
-  /* …ваш существующий код вкладки «чаты»… */
-
-  // ✂️ добавить в конец: блок авто-сбора под списком источников
-  const box = el('section', { class: 'admin-block' });
-  listEl.append(box);
-  await renderAutoCollect(box);
-}
+    // ---- авто-сбор публичных чатов (ТЗ п. 3.8) ----
+    listEl.append(await renderAutoCollect());
 ```
 
-Подпись `origin` в карточке очереди модерации (ТЗ п. 3.8, 4.6) — в `adminCard()`:
+Блок сам рисует таблицу обхода (username, тип, вкл/выкл, курсор, последняя проверка,
+найдено/создано/отсеяно, последняя ошибка), кнопки «включить/выключить», «сбросить курсор»,
+«проверить сейчас», «удалить», форму добавления чата и раскрывающийся «Отчёт последнего
+прогона и статус источников» (`GET /api/admin/collect/status`). Если миграция 0004 не
+применена, вместо таблицы показывается подсказка об этом.
 
-```js
-card.append(originBadge(l));   // «сборщик» / «расширение» / «бот»
+### Правка 2 — бейдж источника в карточке модерации (`adminCard()`, ~L587)
+
+```diff
+-    el('span', { class: 'src' }, [sourceContent(l)]),
++    el('span', { class: 'src' }, [originBadge(l), sourceContent(l)]),
 ```
 
-Фильтр очереди по `origin`: `GET /api/admin/collect/status` уже отдаёт `listingsByOrigin`, а для самого списка достаточно клиентской фильтрации `items.filter(l => (l.origin || 'bot') === tab)` — поле `origin` приходит в каждой заявке после миграции 0004.
+`originBadge()` возвращает `null` для заявок из бота (обычный источник, бейдж не нужен)
+и подписи «сборщик» / «расширение» — для собранных автоматически.
 
-Инструкция про токен для расширения — на вкладке «чаты» в блоке отчёта (`autoCollectReport` уже печатает «выключен: wrangler secret put INGEST_TOKEN», если секрета нет).
+### Правка 3 — фильтр очереди по источнику (`loadAdmin()`, ~L755)
+
+```diff
+-    const { items } = await res.json();
++    let { items } = await res.json();
+     …
+     const listEl = $('#admin-list');
+     listEl.replaceChildren();
++
++    // ---- фильтр «откуда заявка» (ТЗ п. 3.8) ----
++    if (adminTab === 'pending') {
++      listEl.append(pendingOriginFilter(items, adminOriginFilter, (next) => {
++        adminOriginFilter = next;
++        loadAdmin();
++      }));
++      items = filterByOrigin(items, adminOriginFilter);
++    }
+```
+
+Фильтр клиентский: поле `origin` приходит в каждой заявке после миграции 0004, а счётчики
+на кнопках («все · 12», «бот · 7», «сборщик · 4», «расширение · 1») считаются по тому же
+списку, что уже загружен. `$('#admin-count`) остаётся про всю очередь — до фильтрации.
+
+### Правка 4 — ссылка на источник для ключей авто-сбора (`sourceLinkUrl()`, ~L118)
+
+```diff
+ function sourceLinkUrl(l) {
+   if (!l.sourceChatId) return null;
+   if (chatLinks[l.sourceChatId]) return chatLinks[l.sourceChatId];
++  // авто-сбор: web:<username> — публичный чат (ссылка есть),
++  // ext:<peer-id> — приватный чат из расширения (ссылки нет)
++  const web = /^web:([A-Za-z][A-Za-z0-9_]{3,31})$/.exec(l.sourceChatId);
++  if (web) return `https://t.me/${web[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
++  if (l.sourceChatId.startsWith('ext:')) return null;
+   const m = /^-100(\d+)$/.exec(l.sourceChatId);
+   if (!m) return null;
+   return `https://t.me/c/${m[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
+ }
+```
+
+Без этой правки подпись источника у собранных заявок остаётся некликабельной: существующий
+код понимает только id вида `-100…`.
+
+### Стили
+
+Блок использует уже существующие классы (`admin-table`, `btn btn-ink btn-sm`, `q`, `kv`,
+`muted`, `err`, `empty-note`, `admin-card-actions`, `badge`). Новых — два, их стоит добавить
+в `public/styles.css`:
+
+```css
+.origin-filter { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.badge-origin { border-style: dashed; }
+.badge-collector { color: #175cd3; border-color: #b2ccff; background: #f4f7ff; }
+.badge-extension { color: #067647; border-color: #a6f4c5; background: #f0fdf4; }
+```
+
+### Демо-панель: проверить UI до правки прод-файла
+
+```bash
+node parcel/demo/server.mjs          # http://localhost:8790
+```
+
+Один процесс поднимает: страницу админки (склеенные `demo/helpers.js` + `app-auto-collect.js`
++ `demo/demo.js` — те же четыре правки, уже внесённые в демо-копию `loadAdmin`/`adminCard`/
+`renderAdminChats`), настоящий API из `src/server.ts` на локальном sqlite вместо D1 и
+зеркало `t.me/s/` на фикстурах. Кнопка «запустить сбор сейчас» делает настоящий прогон,
+«проверить сейчас» — прогон одного чата. Подробно: [`parcel/demo/README.md`](parcel/demo/README.md).
 
 ---
 
@@ -221,7 +304,35 @@ card.append(originBadge(l));   // «сборщик» / «расширение» 
 
 ---
 
-## 6. Приёмка после переноса
+## 6. Этап 7 — обкатка
+
+Порядок запуска, критерии перехода на следующий шаг, пороги и откат — в
+[`docs/rollout.md`](docs/rollout.md). Два скрипта, которые нужны на обкатке:
+
+```bash
+# разведка чатов ПЕРЕД добавлением в обход (ТЗ п. 3.7): веб-превью открывается?
+# чат живой? объявления вообще есть? какой тип — канал или супергруппа?
+node scripts/probe-chats.mjs durov drivers_pl_by posylki_pl_by --deep
+
+# состояние авто-сбора: проблемы, предупреждения, код возврата 1 для cron/алертов
+node scripts/collect-report.mjs --url https://pop-utka.app --token $ADMIN_API_TOKEN \
+  --stale-hours 6 --fail-on errors,disabled,stale
+```
+
+Оба работают и против локального зеркала (`--base-url http://127.0.0.1:8899/s` у разведки),
+поэтому обкатку можно прогнать без интернета: `node local/mock-tme.mjs`.
+
+В `parcel` скрипты переносятся как есть (они не зависят от Worker API), а в `package.json`
+удобно добавить:
+
+```json
+"probe": "node scripts/probe-chats.mjs",
+"report": "node scripts/collect-report.mjs"
+```
+
+---
+
+## 7. Приёмка после переноса
 
 ```bash
 npm run typecheck

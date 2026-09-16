@@ -32,7 +32,7 @@ npm run server                                    # HTTP API: /api/ingest + ад
 npm run daemon -- --every 900                     # обход каждые 15 мин (замена cron)
 ```
 
-`npm test` — 133 теста, `npm run typecheck` — `tsc --noEmit`.
+`npm test` — 309 тестов, `npm run typecheck` — `tsc --noEmit`.
 
 Локально D1 и KV заменяет встроенный `node:sqlite` (`local/sqlite-env.ts`), поэтому код из `src/` не знает, где он запущен: в воркере — настоящие биндинги, на вашей машине — sqlite-файл.
 
@@ -45,6 +45,9 @@ node local/mock-tme.mjs 8899                                   # «t.me/s/» н�
 npm run scan -- drivers_pl_by --base-url http://127.0.0.1:8899/s
 npm run collect -- --base-url http://127.0.0.1:8899/s --dry
 ```
+
+То же зеркало, но сразу с админкой и настоящим API: `node parcel/demo/server.mjs` →
+http://localhost:8790 (подробно — [`parcel/demo/README.md`](parcel/demo/README.md)).
 
 ---
 
@@ -219,6 +222,7 @@ curl -X POST https://<worker>/api/ingest \
 | `COLLECT_AI_DAILY_LIMIT` | var | `100` | дневной лимит ИИ авто-сбора |
 | `COLLECT_AUTO_APPROVE` | var | `"0"` | зарезервировано; сборка **всегда** `pending` |
 | `INGEST_MAX_AGE_DAYS` | var | `3` | сколько дней хранения у сообщений расширения |
+| `COLLECT_PREVIEW_BASE` | var | `https://t.me/s` | зеркало веб-превью; в проде не задаётся, локально — `local/mock-tme.mjs` или демо |
 
 ---
 
@@ -237,14 +241,19 @@ curl -X POST https://<worker>/api/ingest \
 | `src/collect.ts` | `collectPublicChats()`, курсор, ротация, ошибки, отчёт | 4 |
 | `src/parser.ts`, `src/util.ts`, `src/ai.ts`, `src/types.ts` | копия из `parcel` + точечные правки (см. INTEGRATION.md) | — |
 | `src/telegram.ts` | локальная замена `formatListing`/`notifyAdmins` — в `parcel` НЕ переносится | — |
-| `local/`, `scripts/` | CLI, sqlite-замена D1/KV, mock-зеркало t.me, снятие фикстур — в `parcel` НЕ переносятся | — |
+| `parcel/app-auto-collect.js` | блок вкладки «чаты»: таблица обхода, добавление/включение/сброс курсора/проверка/удаление, отчёт последнего прогона, бейджи `origin`, фильтр очереди по источнику | 6 |
+| `parcel/demo/` | демо-панель: настоящие `app.js`-помощники + блок + API на sqlite + зеркало `t.me/s/` (`node parcel/demo/server.mjs`) | 6 |
+| `scripts/probe-chats.mjs` | разведка чатов перед добавлением: есть ли веб-превью, живой ли чат, канал или супергруппа, доля объявлений, вердикт | 7 |
+| `scripts/collect-report.mjs` | сводка состояния авто-сбора: проблемы, предупреждения, код возврата 1 для cron/алертов | 7 |
+| `docs/rollout.md` | runbook обкатки: день 0–7, критерии перехода, тюнинг, откат | 7 |
+| `local/`, `scripts/` (остальное) | CLI, sqlite-замена D1/KV, mock-зеркало t.me, снятие фикстур, сборка клиента — в `parcel` НЕ переносятся | — |
 | `extension/core.cjs` | чистая логика клиента: настройки, белый список, ключи чата, детект, дедупликация, батчи, backoff, контракт `/api/ingest` | 3 |
 | `extension/dom.cjs` | чтение DOM Telegram Web (только чтение): селекторы-кандидаты, id/даты/авторы, «не могу прочитать сообщения» | 3 |
 | `extension/content.js` | оркестратор: таймер опроса, проход, отправка батчами, панель, обмен с попапом | 3 |
 | `extension/popup.*`, `manifest.json` | настройки, счётчики, «Проверить сервер», «Диагностика вкладки» | 3 |
 | `extension/vendor/parser.js` | бандл `src/parser.ts` (esbuild) — клиентский детект до отправки | 3 |
 | `userscript/poputchka-collector.user.js` | тот же клиент одним файлом (собирается `npm run build:ext`) | 3 |
-| `tests/` | 241 тест + фикстуры разметки и мини-DOM | 1–5 |
+| `tests/` | 309 тестов + фикстуры разметки, мини-DOM и мини-браузер | 1–7 |
 
 Квоты ИИ разведены по каналам (ТЗ п. 2.4, 3.5, 4.4): `ai:day:*` — бот (300/день), `ai:collect:day:*` — сборщик, `ai:ingest:day:*` — расширение (по `COLLECT_AI_DAILY_LIMIT`, 100/день). При исчерпании своего счётчика канал продолжает разбирать правила — сбор не встаёт.
 
@@ -253,7 +262,7 @@ curl -X POST https://<worker>/api/ingest \
 ## Тесты
 
 ```bash
-npm test              # 241 тест
+npm test              # 309 тестов
 npm run typecheck
 npm run build:ext     # бандл парсера для клиента + юзерскрипт одним файлом
 ```
@@ -267,9 +276,48 @@ npm run build:ext     # бандл парсера для клиента + юзе
 | `tests/sourcelink.test.ts` | `listingSourceLink()`: `web:durov`+528 → `t.me/durov/528`, `ext:-100123` → `null`, приоритет `chat_links`, карточка `formatListing` |
 | `tests/extension-core.test.ts` | клиентская логика: диапазоны настроек (60–600 с, батч ≤ 100), белый список (пустой = ничего не читаем), `web:`/`ext:` ключи, синтетический `messageId`, детект на бандле парсера и запасной по словам, возраст, лог отправленного, батчи, backoff, коды HTTP, тело запроса строго по контракту, счётчики, диагностика; бандл `vendor/parser.js` не разъехался с `src/parser.ts` |
 | `tests/extension-dom.test.ts` | чтение разметки: основная и запасные стратегии селекторов, id из атрибутов/ссылок/составных форматов, коллизии id → синтетика, сервисные сообщения, пустые узлы и повторы, `limit`, даты из `time[datetime]` и подписей («вчера», «12.09», «12 сентября», «Sep 12»), чат из URL/заголовка вкладки, нечитаемая разметка → `unreadable` |
+| `tests/admin-ui.test.ts` | блок вкладки «чаты» в мини-DOM: таблица обхода и её колонки, действия (вкл/выкл/сброс курсора/проверить сейчас/удалить) и их запросы, форма добавления чата, отчёт последнего прогона, бейджи `origin`, фильтр очереди, подсказка при неприменённой миграции 0004, ошибки API → `toast()` |
+| `tests/probe.test.ts` | разведка чатов: вердикты (`добавлять` / `проверить вручную` / `не добавлять`), username из URL и `@`, пагинация `--deep`, диагнозы (404, `missing`, `blocked`, `markup_changed`, обрыв сети), мёртвый чат > 30 дней, зеркало `--base-url`, чистая функция `recommend()`, человекочитаемый отчёт |
+| `tests/monitor.test.ts` | сводка мониторинга: healthy и problems (`errors`, `disabled`, нет токена, `stale`, квота ИИ на исходе, пустой прогон, dry run), форматирование отчёта со склонениями, `fetchState` при 401/500/без URL |
 | `tests/extension-content.test.ts` | оркестратор в мини-браузере (`tests/helpers/fake-browser.ts`): один `POST` с `Bearer` и только объявлениями, счётчики и лог в storage, повторный проход пуст, чужой чат не читается, приватный чат без публичной ссылки, нарезка на батчи, `confirmMode` + клик, пауза, диагностика, 401/503/429/413/5xx/обрыв сети/битый JSON, «не могу прочитать сообщения» |
 
 Фикстуры в `tests/fixtures/` повторяют реальную структуру `t.me/s/` (контейнеры `.tgme_widget_message[_wrap]`, `data-post`, `.tgme_widget_message_text`, `<time datetime>`, media-обвязка, сервисные сообщения). Обновить снимки с живого Telegram: `npm run fixture -- durov drivers_pl_by`.
+
+---
+
+## Обкатка и мониторинг (этап 7)
+
+Полный порядок ввода в работу — [`docs/rollout.md`](docs/rollout.md): репетиция на демо,
+dry run на проде, первый боевой прогон, включение cron, ежедневный контроль, критерии
+завершения обкатки и откат. Два скрипта, которые нужны каждый день:
+
+```bash
+# разведка чатов ПЕРЕД добавлением в обход (ТЗ п. 3.7) — ничего не пишет
+node scripts/probe-chats.mjs drivers_pl_by durov gone_channel --deep
+#  drivers_pl_by — ДОБАВЛЯТЬ
+#    превью: https://t.me/s/drivers_pl_by → ok (http 200)
+#    сообщений на странице: 3, id до 9004, последнее 2026-09-11 (5 дн. назад)
+#    · Авторов видно в 100% сообщений → тип «супергруппа».
+#    добавить: curl -X POST $URL/api/admin/watch-chats … -d '{"username":"drivers_pl_by","kind":"supergroup"}'
+#  durov — НЕ ДОБАВЛЯТЬ
+#    · Чат мёртвый: последнее сообщение 62 дн. назад (порог 30 дн.).
+#  gone_channel — НЕ ДОБАВЛЯТЬ
+#    · Ответ 404 от t.me.
+#  Итог: 1 из 3 можно добавлять в обход.
+
+# состояние авто-сбора: проблемы, предупреждения, итоги последнего прогона
+node scripts/collect-report.mjs --url https://<ваш-домен> --token $ADMIN_API_TOKEN --stale-hours 6
+node scripts/collect-report.mjs --url "$URL" --token "$TOKEN" --fail-on errors,disabled,stale  # код 1 → алерт
+node scripts/collect-report.mjs --url "$URL" --token "$TOKEN" --json                            # для своих дашбордов
+```
+
+Оба скрипта работают и против зеркала фикстур (`--base-url` у разведки, `--url` у сводки),
+поэтому обкатку можно отрепетировать без интернета:
+
+```bash
+node parcel/demo/server.mjs        # http://localhost:8790 — демо-панель + API + зеркало t.me/s
+node scripts/collect-report.mjs --url http://localhost:8790 --token demo-admin-token
+```
 
 ---
 
@@ -279,6 +327,6 @@ npm run build:ext     # бандл парсера для клиента + юзе
 - Любые записывающие действия от имени аккаунта заказчика. Сервер только читает публичные превью и принимает текст.
 - Публикация без модерации: `AUTO_APPROVE=1` на собранные заявки не влияет.
 - Сбор приватных чатов на сервере — приватные чаты идут только через расширение из браузера заказчика.
-- Браузерное расширение (этап 3 ТЗ) — на стороне исполнителя; контракт к нему описан выше и покрыт тестами `tests/ingest-api.test.ts`.
+- Отдельный интерфейс модерации — используется существующая админка `parcel`: этап 6 добавляет в неё блок авто-сбора (`parcel/app-auto-collect.js`), а не новую страницу.
 
 Автоматизация аккаунта Telegram — на ваш страх и риск: только чтение, отдельный номер, редкий опрос, никаких массовых действий.

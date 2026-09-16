@@ -47,6 +47,12 @@ export interface Env {
   INGEST_MAX_AGE_DAYS?: string;
   /** Базовый URL Telegram Bot API (по умолчанию https://api.telegram.org) — для тестов/прокси. */
   TG_API_BASE?: string;
+  /**
+   * Базовый URL веб-превью вместо `https://t.me/s` — локальное зеркало
+   * (`node local/mock-tme.mjs`) для обкатки сборщика без боевого Telegram.
+   * В проде не задаётся.
+   */
+  COLLECT_PREVIEW_BASE?: string;
 }
 
 export type ListingType = 'offer' | 'request';

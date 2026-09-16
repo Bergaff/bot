@@ -503,13 +503,21 @@ export async function collectPublicChats(env: Env, opts: CollectOptions = {}): P
     chats = await dueWatchChats(env, cfg.maxChats);
   }
 
+  // Зеркало превью для обкатки: явный opts.baseUrl важнее переменной окружения.
+  const runOpts: CollectOptions = opts.baseUrl || !env.COLLECT_PREVIEW_BASE
+    ? opts
+    : { ...opts, baseUrl: env.COLLECT_PREVIEW_BASE };
+  if (runOpts.baseUrl && runOpts.baseUrl !== opts.baseUrl) {
+    console.log(`collect: превью читаем с зеркала ${runOpts.baseUrl}`);
+  }
+
   const state: RunState = {
     fetches: 0,
     // жёсткий потолок сетевых запросов на весь прогон (лимит подзапросов воркера)
     maxFetches: Math.max(1, Math.min(cfg.maxFetches, opts.maxFetches ?? cfg.maxFetches)),
     pages: 0,
     cfg,
-    opts,
+    opts: runOpts,
     env,
     useAi,
     quotaLeft,

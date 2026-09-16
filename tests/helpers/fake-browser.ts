@@ -8,7 +8,7 @@
  */
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { FakeNode, bubble, bubblesList, queryAll } from './fake-dom';
+import { FakeDocument, FakeNode, bubble, bubblesList, queryAll } from './fake-dom';
 
 const EXT = new URL('../../extension/', import.meta.url);
 
@@ -210,24 +210,4 @@ export function defaultPage(): FakeNode {
 export function brokenPage(): FakeNode {
   return new FakeNode('div', { className: 'brand-new-layout' })
     .append(new FakeNode('section', { className: 'unknown', text: '25.09 Варшава — Брест, возьму посылку' }));
-}
-
-class FakeDocument {
-  readonly documentElement = new FakeNode('html');
-  readonly body: FakeNode;
-  title = '';
-
-  constructor(page: FakeNode) {
-    this.body = new FakeNode('body');
-    this.body.append(page);
-  }
-
-  createElement(tag: string): FakeNode { return new FakeNode(tag); }
-
-  getElementById(id: string): FakeNode | null {
-    return queryAll(this.documentElement, `#${id}`)[0] ?? queryAll(this.body, `#${id}`)[0] ?? null;
-  }
-
-  querySelector(selector: string): FakeNode | null { return this.body.querySelector(selector); }
-  querySelectorAll(selector: string): FakeNode[] { return this.body.querySelectorAll(selector); }
 }

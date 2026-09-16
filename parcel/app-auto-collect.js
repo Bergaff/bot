@@ -31,7 +31,8 @@ function autoCollectTable(chats) {
 
   const rows = chats.map((c) => {
     const busy = { value: false };
-    const act = async (label, fn) => el('button', {
+    // ВАЖНО: не async — иначе вернётся Promise, а не кнопка
+    const act = (label, fn) => el('button', {
       class: 'btn btn-ink btn-sm', type: 'button', text: label,
       onclick: async (ev) => {
         if (busy.value) return;
@@ -161,7 +162,7 @@ async function renderAutoCollect(container) {
     const { chats, needsSetup } = await chatsRes.json();
     const status = statusRes.ok ? await statusRes.json() : null;
 
-    box.replaceChildren(
+    box.replaceChildren(...[
       el('h3', { text: 'Авто-сбор публичных чатов' }),
       el('p', {
         class: 'muted',
@@ -178,15 +179,99 @@ async function renderAutoCollect(container) {
         el('summary', { text: 'Отчёт последнего прогона и статус источников' }),
         autoCollectReport(status),
       ]) : null,
-    );
+    ].filter(Boolean));
   } catch (e) {
     box.replaceChildren(el('p', { class: 'empty-note', text: `Авто-сбор не загрузился: ${e.message || e}` }));
   }
   return box;
 }
 
-/** Подпись источника в карточке модерации: «сборщик» / «расширение» / «бот». */
+/**
+ * Подпись источника в карточке модерации: «сборщик» / «расширение».
+ * Для заявок из бота возвращает null — это обычный, привычный модератору
+ * источник, и плодить лишние бейджи на каждой карточке смысла нет
+ * (фильтр «бот · N» в pendingOriginFilter их всё равно считает).
+ */
 function originBadge(listing) {
-  const label = ORIGIN_LABELS[listing.origin] || 'бот';
-  return el('span', { class: 'badge badge-origin', text: label, title: 'Откуда пришла заявка' });
+  const origin = originOf(listing);
+  if (origin === 'bot') return null;
+  return el('span', {
+    class: 'badge badge-origin badge-' + origin,
+    text: ORIGIN_LABELS[origin],
+    title: origin === 'collector'
+      ? 'Собрано сервером из веб-превью публичного чата (t.me/s/…)'
+      : 'Прислано расширением из вкладки Telegram Web',
+  });
 }
+
+/* ------------------------------------------------------------------ *
+ * Очередь модерации: подпись источника и фильтр «откуда заявка».
+ *
+ * Заявки теперь приходят из трёх мест (ТЗ п. 3.8): бот в чатах, серверный
+ * сборщик публичных чатов и расширение в вкладке заказчика. Модератору важно
+ * видеть источник — у собранных автоматически чаще плывут города и даты.
+ *
+ * Правки в app.js (подробно в INTEGRATION.md, шаг 6):
+ *   1) в adminCard(): el('span', { class: 'src' }, [originBadge(l), sourceContent(l)])
+ *   2) в loadAdmin(): const { items } → let { items }, и после listEl.replaceChildren()
+ *        if (adminTab === 'pending') {
+ *          listEl.append(pendingOriginFilter(items, adminOriginFilter, (next) => {
+ *            adminOriginFilter = next; loadAdmin();
+ *          }));
+ *          items = filterByOrigin(items, adminOriginFilter);
+ *        }
+ * ------------------------------------------------------------------ */
+
+/** Текущий фильтр очереди: 'all' | 'bot' | 'collector' | 'extension'. */
+let adminOriginFilter = 'all';
+
+/**
+ * Источник заявки. У старых записей поля origin нет (миграция 0004 добавляет
+ * его со значением 'bot'), поэтому всё неизвестное считаем ботом.
+ */
+function originOf(l) {
+  return l && (l.origin === 'collector' || l.origin === 'extension') ? l.origin : 'bot';
+}
+
+/** Отфильтровать список заявок по источнику ('all' — без фильтра). */
+function filterByOrigin(items, origin) {
+  const list = Array.isArray(items) ? items : [];
+  if (!origin || origin === 'all') return list.slice();
+  return list.filter((l) => originOf(l) === origin);
+}
+
+/** Сколько заявок каждого источника в списке — для подписей на кнопках фильтра. */
+function countByOriginClient(items) {
+  const counts = { all: 0, bot: 0, collector: 0, extension: 0 };
+  for (const l of Array.isArray(items) ? items : []) {
+    counts.all++;
+    counts[originOf(l)]++;
+  }
+  return counts;
+}
+
+/**
+ * Панель фильтра очереди модерации. `onPick(origin)` — вызов при клике;
+ * в app.js это `(next) => { adminOriginFilter = next; loadAdmin(); }`.
+ */
+function pendingOriginFilter(items, current, onPick) {
+  const counts = countByOriginClient(items);
+  const variants = [
+    ['all', 'все'],
+    ['bot', 'бот'],
+    ['collector', 'сборщик'],
+    ['extension', 'расширение'],
+  ];
+  return el('div', { class: 'origin-filter' }, variants.map(([value, label]) => el('button', {
+    class: 'btn btn-sm ' + (value === current ? 'btn-ink' : 'btn-line'),
+    type: 'button',
+    text: `${label} · ${counts[value]}`,
+    title: value === 'all'
+      ? 'Показать всю очередь'
+      : `Только заявки, которые пришли: ${ORIGIN_LABELS[value]}`,
+    onclick: () => { if (value !== current && typeof onPick === 'function') onPick(value); },
+  })));
+}
+
+/** Сбросить фильтр (например, после публикации всех заявок). */
+function resetOriginFilter() { adminOriginFilter = 'all'; }

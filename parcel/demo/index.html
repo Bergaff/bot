@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>попутка. — админка: авто-сбор объявлений (демо этапа 6)</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script>window.POPUTKA_API_BASE = '';</script>
+</head>
+<body>
+  <header class="demo-head">
+    <div class="wrap">
+      <b>попутка.</b>
+      <span class="muted">админ-панель · демо этапа 6 — авто-сбор объявлений из чатов</span>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <p class="demo-note">
+      Страница собрана из настоящих помощников <code>public/app.js</code> (<code>demo/helpers.js</code>),
+      настоящего блока <code>parcel/app-auto-collect.js</code> и демо-обвязки (<code>demo/demo.js</code>) —
+      сервер склеивает их в один модуль <code>/demo-bundle.js</code>, ровно как они будут склеены в
+      <code>public/app.js</code> в проде. Данные — локальный sqlite вместо D1 и зеркало
+      <code>t.me/s/</code> на фикстурах вместо боевого Telegram, поэтому «проверить сейчас» работает без интернета.
+    </p>
+
+    <section id="admin-login" class="admin-card" hidden>
+      <p class="admin-contact">Нужен ключ админа. В демо это <code>demo-admin-token</code>.</p>
+    </section>
+
+    <section id="admin-panel">
+      <div class="admin-tabs">
+        <button id="admin-tab-pending" class="tab on" type="button">очередь</button>
+        <button id="admin-tab-board" class="tab" type="button">доска</button>
+        <button id="admin-tab-chats" class="tab" type="button">чаты</button>
+        <span class="spacer"></span>
+        <button id="admin-run-collect" class="btn btn-ink btn-sm" type="button">запустить сбор сейчас</button>
+        <button id="admin-refresh" class="btn btn-line btn-sm" type="button">обновить</button>
+        <button id="admin-reset-demo" class="btn btn-line btn-sm" type="button">сбросить демо-данные</button>
+      </div>
+
+      <p id="admin-count" class="muted"></p>
+      <div id="admin-list"></div>
+    </section>
+  </main>
+
+  <div id="toast" hidden></div>
+  <script type="module" src="/demo-bundle.js"></script>
+</body>
+</html>

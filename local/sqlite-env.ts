@@ -248,7 +248,12 @@ export function envFromProcess(extra: Partial<Env> = {}): Partial<Env> {
     COLLECT_MAX_AGE_DAYS: num(p.COLLECT_MAX_AGE_DAYS) ?? '7',
     COLLECT_AI_DAILY_LIMIT: num(p.COLLECT_AI_DAILY_LIMIT) ?? '100',
     COLLECT_MAX_FETCHES: num(p.COLLECT_MAX_FETCHES),
+    COLLECT_PREVIEW_BASE: num(p.COLLECT_PREVIEW_BASE),
+    INGEST_MAX_AGE_DAYS: num(p.INGEST_MAX_AGE_DAYS),
     SITE_URL: num(p.SITE_URL),
+    // для локальной отладки: зеркало t.me/s (local/mock-tme.mjs), мок Bot API и ИИ
+    TG_API_BASE: num(p.TG_API_BASE),
+    AI_BASE_URL: num(p.AI_BASE_URL),
     ...extra,
   };
 }

@@ -13,7 +13,7 @@ import {
   parseVisibleDate,
   MAX_MESSAGE_TEXT,
 } from '../src/preview-html';
-import { diagnosePage, looksLikeBlocked, looksLikeMissingChannel, looksLikePreviewMarkup, normalizeUsername, previewUrl } from '../src/preview';
+import { diagnosePage, looksLikeBlocked, looksLikeMessagePayload, looksLikeMissingChannel, looksLikePreviewMarkup, normalizeUsername, previewUrl } from '../src/preview';
 import { FIXTURES } from './fixtures';
 
 const NOW = new Date('2026-09-15T12:00:00Z');
@@ -137,6 +137,31 @@ describe('parsePreviewHtml: битая разметка не роняет сбо
 
   it('не-200 → http_<code>', () => {
     expect(diagnosePage({ status: 503, html: '', messages: [] })).toBe('http_503');
+  });
+
+  it('живая страница, но сообщения не разобрались → markup_changed, а НЕ missing', () => {
+    // у настоящей t.me/s/ есть tgme_page_wrap и tgme_page_background: по ним заглушку
+    // «чат не найден» отличить нельзя. Иначе смена разметки мгновенно выключала бы
+    // все чаты обхода (missing → disableNow) вместо трёх попыток с алертом.
+    for (const html of [FIXTURES.channel(), FIXTURES.supergroup(), FIXTURES.noDataPost()]) {
+      expect(looksLikePreviewMarkup(html)).toBe(true);
+      expect(looksLikeMessagePayload(html)).toBe(true);
+      expect(looksLikeMissingChannel(html)).toBe(false);
+      expect(diagnosePage({ status: 200, html, messages: [] })).toBe('markup_changed');
+    }
+  });
+
+  it('заглушка «чат не найден» отличается от живой страницы превью', () => {
+    expect(looksLikeMissingChannel(FIXTURES.missing())).toBe(true);
+    expect(looksLikeMissingChannel('<div class="tgme_page_title">Channel not found</div>')).toBe(true);
+    expect(looksLikeMissingChannel('<div class="tgme_page_wrap tgme_page_background">живая страница</div>')).toBe(false);
+    expect(looksLikeMissingChannel('')).toBe(false);
+  });
+
+  it('пустые обёртки без содержимого → empty (пустой канал)', () => {
+    const html = '<div class="tgme_widget_message_wrap"></div>';
+    expect(looksLikeMessagePayload(html)).toBe(false);
+    expect(diagnosePage({ status: 200, html, messages: [] })).toBe('empty');
   });
 
   it('знакомая разметка, но сообщений нет → empty (пустой чат)', () => {
