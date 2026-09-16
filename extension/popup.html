@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>попутка. сборщик</title>
+  <style>
+    body { width: 360px; margin: 0; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; color: #0f172a; background: #fff; }
+    header { padding: 10px 12px; border-bottom: 1px solid #eef1f4; }
+    header b { font-size: 14px; }
+    header p { margin: 4px 0 0; color: #64748b; font-size: 12px; }
+    main { padding: 10px 12px 14px; }
+    label { display: block; margin: 8px 0 3px; color: #475569; font-size: 12px; }
+    input[type=text], input[type=password], input[type=number], textarea, select {
+      width: 100%; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 8px; font: inherit;
+    }
+    textarea { min-height: 56px; resize: vertical; }
+    .row { display: flex; gap: 8px; }
+    .row > div { flex: 1; }
+    .check { display: flex; gap: 6px; align-items: center; margin: 8px 0; }
+    .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    button { border: 1px solid #cbd5e1; background: #fff; border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; }
+    button:hover { background: #f8fafc; }
+    button.primary { background: #0f172a; border-color: #0f172a; color: #fff; }
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; margin-top: 8px; }
+    .stats div { display: flex; justify-content: space-between; border-bottom: 1px dashed #eef1f4; padding: 2px 0; }
+    .stats span:first-child { color: #64748b; }
+    .msg { margin-top: 8px; padding: 7px 9px; border-radius: 8px; font-size: 12px; }
+    .msg.err { background: #fff1f2; color: #9f1239; border: 1px solid #fecdd3; }
+    .msg.ok { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+    .msg.warn { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+    pre { white-space: pre-wrap; background: #0f172a; color: #e2e8f0; padding: 8px; border-radius: 8px; font-size: 11px; margin: 8px 0 0; }
+    .note { margin-top: 10px; padding: 8px; border: 1px solid #e2e8f0; border-radius: 8px; color: #475569; font-size: 11.5px; }
+    code { background: #f1f5f9; padding: 1px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <b>попутка. — сбор объявлений</b>
+    <p>Только чтение вкладки Telegram Web. Ничего не публикует и не отправляет от вашего имени: найденное уходит в очередь модерации на сервере.</p>
+  </header>
+  <main>
+    <label for="serverUrl">Сервер (базовый URL воркера)</label>
+    <input id="serverUrl" type="text" placeholder="https://pop-utka.app" autocomplete="off">
+
+    <label for="token">INGEST_TOKEN</label>
+    <input id="token" type="password" placeholder="Bearer-токен для /api/ingest" autocomplete="off">
+
+    <label for="whitelist">Белый список чатов (по строке: название или t.me/…)</label>
+    <textarea id="whitelist" placeholder="Водители Польша–Беларусь&#10;t.me/drivers_pl_by"></textarea>
+
+    <div class="row">
+      <div>
+        <label for="intervalSec">Опрос, с (60–180)</label>
+        <input id="intervalSec" type="number" min="60" max="600" step="10">
+      </div>
+      <div>
+        <label for="batchSize">Сообщений в запросе</label>
+        <input id="batchSize" type="number" min="1" max="100" step="1">
+      </div>
+      <div>
+        <label for="maxPerChat">Читать последних</label>
+        <input id="maxPerChat" type="number" min="1" max="200" step="5">
+      </div>
+    </div>
+
+    <label for="maxAgeHours">Не старше, часов</label>
+    <input id="maxAgeHours" type="number" min="1" max="720" step="1">
+
+    <div class="check"><input id="confirmMode" type="checkbox"><label for="confirmMode" style="margin:0">Спрашивать подтверждение перед отправкой</label></div>
+    <div class="check"><input id="requireContact" type="checkbox"><label for="requireContact" style="margin:0">Слать только сообщения с контактом (телефон или @username)</label></div>
+    <div class="check"><input id="paused" type="checkbox"><label for="paused" style="margin:0">Пауза (ничего не читать и не отправлять)</label></div>
+
+    <div class="btns">
+      <button id="save" class="primary">Сохранить</button>
+      <button id="check">Проверить сервер</button>
+      <button id="diagnose">Диагностика вкладки</button>
+      <button id="send">Отправить найденные</button>
+      <button id="reset">Сбросить счётчики</button>
+    </div>
+
+    <div id="msg"></div>
+
+    <div class="stats" id="stats"></div>
+    <pre id="diag" hidden></pre>
+
+    <div class="note">
+      Токен хранится только в <code>chrome.storage.local</code> этого браузера и в репозиторий не попадает.
+      На сервере: <code>wrangler secret put INGEST_TOKEN</code>.
+      Автоматизация аккаунта Telegram — на ваш страх и риск: используйте отдельный номер,
+      держите редкий интервал опроса и режим подтверждения.
+    </div>
+  </main>
+  <script src="core.cjs"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

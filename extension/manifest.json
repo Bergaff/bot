@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "попутка. — сбор объявлений из чатов",
+  "version": "1.0.0",
+  "description": "Только чтение: находит в открытой вкладке Telegram Web объявления о передаче посылок и отправляет их на сервер попутки (POST /api/ingest). Ничего не публикует и не отправляет от вашего имени.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://web.telegram.org/*",
+    "https://pop-utka.app/*",
+    "https://*.workers.dev/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://web.telegram.org/*"],
+      "js": ["vendor/parser.js", "core.cjs", "dom.cjs", "content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "попутка. сборщик — настройки и счётчики"
+  }
+}

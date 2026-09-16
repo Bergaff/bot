@@ -95,9 +95,13 @@ src/collect.ts       курсор, ротация, лимит запросов, 
 ```
 src/routes.ts   POST /api/ingest (Bearer INGEST_TOKEN) + админ-API авто-сбора
 src/server.ts   Hono-приложение, CORS, админ-middleware, scheduled() с switch (event.cron)
+extension/      расширение Chrome (MV3) + попап настроек: читает вкладку web.telegram.org
+userscript/     тот же клиент одним файлом для Tampermonkey/Violentmonkey
 ```
 
 Сервер ничего не знает о браузере: принимает текст и метаданные, дальше работает тот же `ingestMessage()` с `origin: 'extension'`. Заявки **всегда** `pending` — `AUTO_APPROVE` на них не влияет.
+
+Клиент (этап 3) — **только чтение** открытой вкладки: ни кликов, ни отправки, ни реакций. Чат не из белого списка не читается вовсе; пассажирские попутки и болтовня отсеиваются ещё в браузере (бандл `src/parser.ts` → `extension/vendor/parser.js`); по умолчанию стоит режим подтверждения; дубли режет локальный лог `chatId:messageId`, а на сервере — `tg_seen`. Установка, настройки, коды ошибок и починка селекторов — в [`extension/README.md`](extension/README.md).
 
 Защита от мусора: `INGEST_TOKEN` — отдельный секрет (отзывается без потери админ-доступа), нет секрета → 503; rate limit 60 запросов/час на токен → 429 с `Retry-After`; максимум 100 сообщений в батче → 413; невалидные элементы идут в `results` со `status: 'invalid'` и не роняют батч; свой счётчик ИИ `ai:ingest:day:*`.
 
@@ -234,7 +238,13 @@ curl -X POST https://<worker>/api/ingest \
 | `src/parser.ts`, `src/util.ts`, `src/ai.ts`, `src/types.ts` | копия из `parcel` + точечные правки (см. INTEGRATION.md) | — |
 | `src/telegram.ts` | локальная замена `formatListing`/`notifyAdmins` — в `parcel` НЕ переносится | — |
 | `local/`, `scripts/` | CLI, sqlite-замена D1/KV, mock-зеркало t.me, снятие фикстур — в `parcel` НЕ переносятся | — |
-| `tests/` | 133 теста + фикстуры разметки | 1–5 |
+| `extension/core.cjs` | чистая логика клиента: настройки, белый список, ключи чата, детект, дедупликация, батчи, backoff, контракт `/api/ingest` | 3 |
+| `extension/dom.cjs` | чтение DOM Telegram Web (только чтение): селекторы-кандидаты, id/даты/авторы, «не могу прочитать сообщения» | 3 |
+| `extension/content.js` | оркестратор: таймер опроса, проход, отправка батчами, панель, обмен с попапом | 3 |
+| `extension/popup.*`, `manifest.json` | настройки, счётчики, «Проверить сервер», «Диагностика вкладки» | 3 |
+| `extension/vendor/parser.js` | бандл `src/parser.ts` (esbuild) — клиентский детект до отправки | 3 |
+| `userscript/poputchka-collector.user.js` | тот же клиент одним файлом (собирается `npm run build:ext`) | 3 |
+| `tests/` | 241 тест + фикстуры разметки и мини-DOM | 1–5 |
 
 Квоты ИИ разведены по каналам (ТЗ п. 2.4, 3.5, 4.4): `ai:day:*` — бот (300/день), `ai:collect:day:*` — сборщик, `ai:ingest:day:*` — расширение (по `COLLECT_AI_DAILY_LIMIT`, 100/день). При исчерпании своего счётчика канал продолжает разбирать правила — сбор не встаёт.
 
@@ -243,8 +253,9 @@ curl -X POST https://<worker>/api/ingest \
 ## Тесты
 
 ```bash
-npm test              # 133 теста
+npm test              # 241 тест
 npm run typecheck
+npm run build:ext     # бандл парсера для клиента + юзерскрипт одним файлом
 ```
 
 | Файл | Что проверяет |
@@ -254,6 +265,9 @@ npm run typecheck
 | `tests/ingest.test.ts` | порядок шагов конвейера, `duplicate` (каскад не вызывается), `skipped:passenger`/`no_intent`/`too_old`/`too_long`/`too_short`, откат `tg_seen` при ошибке, несколько заявок из одного сообщения, `dryRun`, счетчики квот, порядок обработки |
 | `tests/ingest-api.test.ts` | контракт `/api/ingest`: 200/400/401/413/429/503, `summary`/`results`/`cursors`, `invalid` не роняет батч, `dryRun`, CORS и preflight, админ-API `watch-chats`/`collect`/`collect/status` |
 | `tests/sourcelink.test.ts` | `listingSourceLink()`: `web:durov`+528 → `t.me/durov/528`, `ext:-100123` → `null`, приоритет `chat_links`, карточка `formatListing` |
+| `tests/extension-core.test.ts` | клиентская логика: диапазоны настроек (60–600 с, батч ≤ 100), белый список (пустой = ничего не читаем), `web:`/`ext:` ключи, синтетический `messageId`, детект на бандле парсера и запасной по словам, возраст, лог отправленного, батчи, backoff, коды HTTP, тело запроса строго по контракту, счётчики, диагностика; бандл `vendor/parser.js` не разъехался с `src/parser.ts` |
+| `tests/extension-dom.test.ts` | чтение разметки: основная и запасные стратегии селекторов, id из атрибутов/ссылок/составных форматов, коллизии id → синтетика, сервисные сообщения, пустые узлы и повторы, `limit`, даты из `time[datetime]` и подписей («вчера», «12.09», «12 сентября», «Sep 12»), чат из URL/заголовка вкладки, нечитаемая разметка → `unreadable` |
+| `tests/extension-content.test.ts` | оркестратор в мини-браузере (`tests/helpers/fake-browser.ts`): один `POST` с `Bearer` и только объявлениями, счётчики и лог в storage, повторный проход пуст, чужой чат не читается, приватный чат без публичной ссылки, нарезка на батчи, `confirmMode` + клик, пауза, диагностика, 401/503/429/413/5xx/обрыв сети/битый JSON, «не могу прочитать сообщения» |
 
 Фикстуры в `tests/fixtures/` повторяют реальную структуру `t.me/s/` (контейнеры `.tgme_widget_message[_wrap]`, `data-post`, `.tgme_widget_message_text`, `<time datetime>`, media-обвязка, сервисные сообщения). Обновить снимки с живого Telegram: `npm run fixture -- durov drivers_pl_by`.
 

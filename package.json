@@ -16,7 +16,8 @@
     "server": "node local/cli.ts server",
     "ingest": "node local/cli.ts ingest",
     "daemon": "node local/cli.ts daemon",
-    "fixture": "node scripts/fetch-fixture.mjs"
+    "fixture": "node scripts/fetch-fixture.mjs",
+    "build:ext": "node scripts/build-extension.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   }
