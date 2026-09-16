@@ -133,6 +133,22 @@
 
   function clamp(n, min, max) { return Math.min(max, Math.max(min, n)); }
 
+  /**
+   * Годится ли URL сервера. Возвращает текст проблемы или null.
+   * https — всегда; http — только для локальной отладки (127.0.0.1/localhost),
+   * потому что страница web.telegram.org открыта по https и обычный http-адрес
+   * браузер заблокирует как mixed content.
+   */
+  function serverUrlProblem(raw) {
+    const url = String(raw || '').trim();
+    if (!url) return 'Укажите базовый URL сервера (например https://pop-utka.app).';
+    if (/^https:\/\/[^\s/]/.test(url)) return null;
+    if (/^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(url)) return null;
+    return 'URL сервера должен начинаться с https://. Для локальной отладки годится ' +
+      'http://127.0.0.1:8790 — остальные http-адреса браузер заблокирует как mixed content ' +
+      '(страница Telegram Web открыта по https).';
+  }
+
   /* ---------------------------------------------------------------- */
   /* Белый список чатов                                                */
   /* ---------------------------------------------------------------- */
@@ -458,6 +474,7 @@
     localStore,
     withDefaults,
     clamp,
+    serverUrlProblem,
     normalizeWhitelist,
     normalizeWhitelistEntry,
     matchesWhitelist,

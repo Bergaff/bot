@@ -69,8 +69,8 @@
 
   async function saveSettings() {
     const settings = readForm();
-    if (!settings.serverUrl) { show('err', 'Укажите базовый URL сервера (например https://pop-utka.app).'); return; }
-    if (!/^https:\/\//.test(settings.serverUrl)) { show('err', 'URL сервера должен начинаться с https://'); return; }
+    const urlProblem = core.serverUrlProblem(settings.serverUrl);
+    if (urlProblem) { show('err', urlProblem); return; }
     if (!settings.token) { show('warn', 'Токен пустой: сервер ответит 401, сбор не пойдёт.'); }
     if (settings.whitelist.length === 0) { show('warn', 'Белый список пуст — сообщения не будут читаться вовсе.'); }
 
@@ -99,7 +99,8 @@
 
   async function checkServer() {
     const settings = readForm();
-    if (!settings.serverUrl) { show('err', 'Сначала укажите URL сервера.'); return; }
+    const urlProblem = core.serverUrlProblem(settings.serverUrl);
+    if (urlProblem) { show('err', urlProblem); return; }
     try {
       const res = await fetch(settings.serverUrl + '/api/ingest/status', { cache: 'no-store' });
       const body = await res.json().catch(() => null);

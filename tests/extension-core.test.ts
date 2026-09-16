@@ -73,6 +73,33 @@ describe('настройки: с дефолтами и валидацией ди
   });
 });
 
+describe('адрес сервера: https всегда, http — только локально', () => {
+  it('https принимается (прод, workers.dev, демо-песочница)', () => {
+    for (const url of ['https://pop-utka.app', 'https://8790-abc123.e2b.app', 'https://parcel.poputchka.workers.dev']) {
+      expect(core.serverUrlProblem(url)).toBeNull();
+    }
+  });
+
+  it('локальный http для отладки принимается', () => {
+    for (const url of ['http://127.0.0.1:8790', 'http://localhost:8787', 'http://127.0.0.1']) {
+      expect(core.serverUrlProblem(url)).toBeNull();
+    }
+  });
+
+  it('пусто — понятная просьба указать адрес', () => {
+    expect(core.serverUrlProblem('')).toContain('Укажите базовый URL сервера');
+    expect(core.serverUrlProblem('   ')).toContain('Укажите базовый URL сервера');
+  });
+
+  it('обычный http отклоняется: страница Telegram Web открыта по https', () => {
+    for (const url of ['http://pop-utka.app', 'http://192.168.1.10:8790', 'pop-utka.app', 'ftp://x']) {
+      const err = core.serverUrlProblem(url);
+      expect(err).toContain('https://');
+      expect(err).toContain('mixed content');
+    }
+  });
+});
+
 describe('белый список чатов: всё остальное не читается вовсе', () => {
   it('ссылка, @username и название — три способа задать чат', () => {
     expect(core.normalizeWhitelist(['https://t.me/s/drivers_pl_by', '@Drivers_PL_BY', 'Водители Польша–Беларусь']))

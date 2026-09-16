@@ -80,6 +80,8 @@ export interface CoreApi {
   SENT_LOG_LIMIT: number;
   DEFAULT_SETTINGS: ExtSettings;
   withDefaults: (raw?: unknown) => ExtSettings;
+  /** Текст проблемы с адресом сервера или null, если адрес годится. */
+  serverUrlProblem: (raw?: unknown) => string | null;
   normalizeWhitelist: (list: unknown) => Array<{ kind: string; value: string }>;
   matchesWhitelist: (chat: ChatRef | null, whitelist: unknown) => boolean;
   squashTitle: (s: string) => string;

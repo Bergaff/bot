@@ -34,9 +34,28 @@ npm run server                                    # HTTP API: /api/ingest + ад
 npm run daemon -- --every 900                     # обход каждые 15 мин (замена cron)
 ```
 
-`npm test` — 355 тестов, `npm run typecheck` — `tsc --noEmit`.
+`npm test` — 359 тестов, `npm run typecheck` — `tsc --noEmit`.
 
 Локально D1 и KV заменяет встроенный `node:sqlite` (`local/sqlite-env.ts`), поэтому код из `src/` не знает, где он запущен: в воркере — настоящие биндинги, на вашей машине — sqlite-файл.
+
+### Попробовать в браузере (расширение)
+
+Клиентская часть (этап 3) собрана: папка `extension/` — расширение Chrome MV3,
+`userscript/poputchka-collector.user.js` — тот же код одним файлом для Tampermonkey.
+Сервер поднимается одним кликом:
+
+```bat
+start-local.bat        :: Windows: двойной клик
+```
+```bash
+./start-local.sh       # macOS/Linux
+```
+
+Скрипт проверит Node, поставит зависимости и поднимет демо-сервер (админка + `/api/ingest` +
+зеркало `t.me/s`), напечатав значения для попапа: `serverUrl = http://127.0.0.1:8790`,
+`token = demo-ingest-token`. Дальше — `chrome://extensions` → «Загрузить распакованное
+расширение» → папка `extension/` → открыть `web.telegram.org` → «Диагностика вкладки».
+Подробно, с таблицей ошибок: [`docs/try-it.md`](docs/try-it.md).
 
 ### Проверить без интернета
 
@@ -267,7 +286,7 @@ curl -X POST https://<worker>/api/ingest \
 | `extension/popup.*`, `manifest.json` | настройки, счётчики, «Проверить сервер», «Диагностика вкладки» | 3 |
 | `extension/vendor/parser.js` | бандл `src/parser.ts` (esbuild) — клиентский детект до отправки | 3 |
 | `userscript/poputchka-collector.user.js` | тот же клиент одним файлом (собирается `npm run build:ext`) | 3 |
-| `tests/` | 355 тестов + фикстуры разметки, мини-DOM и мини-браузер | 1–7 |
+| `tests/` | 359 тестов + фикстуры разметки, мини-DOM и мини-браузер | 1–7 |
 
 Квоты ИИ разведены по каналам (ТЗ п. 2.4, 3.5, 4.4): `ai:day:*` — бот (300/день), `ai:collect:day:*` — сборщик, `ai:ingest:day:*` — расширение (по `COLLECT_AI_DAILY_LIMIT`, 100/день). При исчерпании своего счётчика канал продолжает разбирать правила — сбор не встаёт.
 
@@ -276,7 +295,7 @@ curl -X POST https://<worker>/api/ingest \
 ## Тесты
 
 ```bash
-npm test              # 355 тестов
+npm test              # 359 тестов
 npm run typecheck
 npm run build:ext     # бандл парсера для клиента + юзерскрипт одним файлом
 ```
