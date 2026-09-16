@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # node:sqlite пока экспериментальный — не шумим предупреждениями в логах
+  NODE_NO_WARNINGS: '1'
+
+jobs:
+  test:
+    name: Типы, тесты, бандл клиента
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # клиент (этап 3) собирается из src/parser.ts: если бандл в репозитории
+      # отстал от парсера, git diff это поймает
+      - name: Бандл расширения и юзерскрипт не разъехались с src/parser.ts
+        run: |
+          npm run build:ext
+          git diff --exit-code --stat extension/vendor/parser.js userscript/poputchka-collector.user.js
+
+  smoke:
+    name: Сквозной прогон без интернета
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # зеркало t.me/s на фикстурах (local/mock-tme.mjs) + разведка чатов +
+      # полный цикл обхода: dry run → боевой прогон → сброс курсора → дубликаты
+      - name: Зеркало, разведка, обход
+        env:
+          COLLECT_DB: ${{ runner.temp }}/ci-collector.db
+        run: |
+          set -euo pipefail
+          mkdir -p .data          # сюда пишем выводы прогонов (каталог в .gitignore)
+          node local/mock-tme.mjs 8899 &
+          for _ in $(seq 1 40); do
+            curl -sf -o /dev/null http://127.0.0.1:8899/s/drivers_pl_by && break
+            sleep 0.25
+          done
+
+          echo '--- разведка: пригодный чат (код возврата 0) ---'
+          node scripts/probe-chats.mjs drivers_pl_by --base-url http://127.0.0.1:8899/s --delay 0
+
+          echo '--- разведка: непригодные чаты (код 1 здесь штатный) ---'
+          bad=$(node scripts/probe-chats.mjs durov gone_channel broken_channel \
+                  --base-url http://127.0.0.1:8899/s --delay 0 || true)
+          echo "$bad"
+          echo "$bad" | grep -q 'мёртвый'          # последнее сообщение > 30 дней назад
+          echo "$bad" | grep -q 'Ответ 404'        # чат не найден
+          echo "$bad" | grep -q 'markup_changed'   # страница есть, разметка чужая
+
+          echo '--- обход ---'
+          npm run db:local
+          node local/cli.ts watch-chats add drivers_pl_by --kind supergroup
+
+          node local/cli.ts collect --dry --base-url http://127.0.0.1:8899/s --no-delay | tee .data/dry.txt
+          grep -q '\[dry run\]' .data/dry.txt
+          grep -q 'создано заявок: 3' .data/dry.txt
+
+          node local/cli.ts collect --base-url http://127.0.0.1:8899/s --no-delay | tee .data/run1.txt
+          grep -q 'создано заявок: 3, дублей: 0, отсеяно: 0, ошибок: 0' .data/run1.txt
+          grep -q 'курсор — → 9004' .data/run1.txt        # dry run курсор не сдвинул
+
+          node local/cli.ts watch-chats cursor web:drivers_pl_by reset
+          node local/cli.ts collect --base-url http://127.0.0.1:8899/s --no-delay | tee .data/run2.txt
+          grep -q 'создано заявок: 0, дублей: 3' .data/run2.txt   # tg_seen держит дубли
+
+          node local/cli.ts watch-chats list | tee .data/chats.txt
+          grep -q '9004' .data/chats.txt
+          node local/cli.ts report | tee .data/report.txt
+          grep -q 'Последний прогон' .data/report.txt

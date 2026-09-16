@@ -15,6 +15,8 @@
 
 ## Быстрый старт (5 минут, локально)
 
+Нужен Node ≥ 22.18: CLI запускает `.ts` напрямую (type stripping), сборка не требуется.
+
 ```bash
 npm install
 npm run db:local                                  # применить миграции → .data/collector.db
@@ -32,7 +34,7 @@ npm run server                                    # HTTP API: /api/ingest + ад
 npm run daemon -- --every 900                     # обход каждые 15 мин (замена cron)
 ```
 
-`npm test` — 309 тестов, `npm run typecheck` — `tsc --noEmit`.
+`npm test` — 321 тест, `npm run typecheck` — `tsc --noEmit`.
 
 Локально D1 и KV заменяет встроенный `node:sqlite` (`local/sqlite-env.ts`), поэтому код из `src/` не знает, где он запущен: в воркере — настоящие биндинги, на вашей машине — sqlite-файл.
 
@@ -253,7 +255,7 @@ curl -X POST https://<worker>/api/ingest \
 | `extension/popup.*`, `manifest.json` | настройки, счётчики, «Проверить сервер», «Диагностика вкладки» | 3 |
 | `extension/vendor/parser.js` | бандл `src/parser.ts` (esbuild) — клиентский детект до отправки | 3 |
 | `userscript/poputchka-collector.user.js` | тот же клиент одним файлом (собирается `npm run build:ext`) | 3 |
-| `tests/` | 309 тестов + фикстуры разметки, мини-DOM и мини-браузер | 1–7 |
+| `tests/` | 321 тест + фикстуры разметки, мини-DOM и мини-браузер | 1–7 |
 
 Квоты ИИ разведены по каналам (ТЗ п. 2.4, 3.5, 4.4): `ai:day:*` — бот (300/день), `ai:collect:day:*` — сборщик, `ai:ingest:day:*` — расширение (по `COLLECT_AI_DAILY_LIMIT`, 100/день). При исчерпании своего счётчика канал продолжает разбирать правила — сбор не встаёт.
 
@@ -262,7 +264,7 @@ curl -X POST https://<worker>/api/ingest \
 ## Тесты
 
 ```bash
-npm test              # 309 тестов
+npm test              # 321 тест
 npm run typecheck
 npm run build:ext     # бандл парсера для клиента + юзерскрипт одним файлом
 ```
@@ -305,11 +307,27 @@ node scripts/probe-chats.mjs drivers_pl_by durov gone_channel --deep
 #    · Ответ 404 от t.me.
 #  Итог: 1 из 3 можно добавлять в обход.
 
-# состояние авто-сбора: проблемы, предупреждения, итоги последнего прогона
+# состояние авто-сбора: проблемы, предупреждения, возраст последнего прогона
 node scripts/collect-report.mjs --url https://<ваш-домен> --token $ADMIN_API_TOKEN --stale-hours 6
 node scripts/collect-report.mjs --url "$URL" --token "$TOKEN" --fail-on errors,disabled,stale  # код 1 → алерт
 node scripts/collect-report.mjs --url "$URL" --token "$TOKEN" --json                            # для своих дашбордов
 ```
+
+Сводку можно не запускать руками: воркфайл `docs/ci/monitor.yml` делает это по расписанию
+(каждые 3 часа) и падает, если есть проблемы, — GitHub пришлёт письмо, текст отчёта окажется
+в job summary. Включается двумя настройками репозитория: переменная `COLLECT_REPORT_URL`
+(адрес сервера) и секрет `COLLECT_ADMIN_TOKEN` (= `ADMIN_API_TOKEN`); пока переменной нет,
+job просто пропускается. Расписание работает из default-ветки, то есть после слияния в `main`.
+
+Воркфайлы лежат в [`docs/ci/`](docs/ci/README.md), а не в `.github/workflows/`: у GitHub-бота
+этой песочницы нет права `workflows`, поэтому push туда отклоняется. Перенос — одна команда:
+
+```bash
+mkdir -p .github/workflows && cp docs/ci/*.yml .github/workflows/ && git add .github && git commit -m "CI"
+```
+
+`docs/ci/ci.yml` на каждый push гоняет типы, тесты и сквозной прогон на зеркале фикстур
+(зеркало → разведка → dry run → боевой прогон → сброс курсора → дубликаты).
 
 Оба скрипта работают и против зеркала фикстур (`--base-url` у разведки, `--url` у сводки),
 поэтому обкатку можно отрепетировать без интернета:

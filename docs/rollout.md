@@ -51,7 +51,7 @@ curl -s -H "Authorization: Bearer $ADMIN_API_TOKEN" \
 
 ## 1. День 0 — репетиция без интернета (30 минут)
 
-Задача: потренироваться на фикстурах, прежде чем трогать прод. Нужен только Node ≥ 22.
+Задача: потренироваться на фикстурах, прежде чем трогать прод. Нужен только Node ≥ 22.18.
 
 ```bash
 npm install
@@ -77,6 +77,11 @@ node scripts/collect-report.mjs --url http://127.0.0.1:8790 --token demo-admin-t
 
 **Критерий перехода:** отчёт прогона читается, заявки видны в очереди, `collect-report.mjs`
 показывает проблемы по сломанному чату и возвращает код 1.
+
+Тот же сценарий без браузера на каждом пуше прогоняет CI: воркфайл `docs/ci/ci.yml`, job
+`smoke` (зеркало → разведка чатов → dry run → боевой прогон → сброс курсора → дубликаты по
+`tg_seen`). Если он зелёный, серверная часть обкатки собрана правильно. Включить:
+скопировать воркфайлы в `.github/workflows/` — см. [`docs/ci/README.md`](ci/README.md).
 
 ---
 
@@ -242,7 +247,24 @@ node scripts/collect-report.mjs --url "$URL" --token "$TOKEN" --fail-on errors,d
 `quota` (квота ИИ на исходе), `empty` (последний прогон ничего не нашёл или был dry run).
 Без `--token` берётся `ADMIN_API_TOKEN` из окружения; `--json` — для своих дашбордов.
 
-Можно повесить на cron-машину: `0 9 * * * cd /path/to/repo && node scripts/collect-report.mjs … || уведомление`.
+Куда повесить сводку — варианты:
+
+- **GitHub Actions (воркфайл уже в репозитории)** — `docs/ci/monitor.yml` (скопировать в
+  `.github/workflows/`, см. [`docs/ci/README.md`](ci/README.md)): каждые
+  3 часа (`25 */3 * * *`, через ~8 минут после обхода воркера) и вручную через «Run workflow»
+  (там же можно поменять `--stale-hours` и список `--fail-on`). Падение прогона = письмо от
+  GitHub, отчёт — в job summary. Включается двумя настройками (Settings → Secrets and
+  variables → Actions): переменная `COLLECT_REPORT_URL` = `https://<ваш-домен>` и секрет
+  `COLLECT_ADMIN_TOKEN` = `ADMIN_API_TOKEN`. Пока переменная не задана, job пропускается.
+  Расписание работает только из default-ветки, поэтому воркфайл должен попасть в `main`.
+- **Своя cron-машина**: `25 9 * * * cd /path/to/repo && node scripts/collect-report.mjs … || уведомление`.
+- **Healthchecks.io** (dead man's switch): тот же запуск с
+  `--fail-on errors,disabled,stale,token`; код 1 → алерт, а если запуск вовсе не состоялся —
+  алерт придёт от самого сервиса (ловит «умерший cron» лучше всего).
+
+Код возврата 1 — это проблемы из `--fail-on`. Остальное в отчёте тоже видно: предупреждения
+(квота ИИ на исходе, пустой прогон, ошибки последнего прогона, нет чатов в обходе) и проблемы
+вне списка `--fail-on` — итоговая строка подскажет, что смотреть.
 
 ### 4.3 Что смотреть каждый день
 
@@ -263,7 +285,7 @@ node scripts/collect-report.mjs --url "$URL" --token "$TOKEN" --fail-on errors,d
 заказчика (ТЗ, раздел «Ограничения»), порядок:
 
 1. `wrangler secret put INGEST_TOKEN`; в админке на вкладке «чаты» появится строка про токен.
-2. Установить расширение (`extension/` — распакованное, или `userscript/parcel-collector.user.js`
+2. Установить расширение (`extension/` — распакованное, или `userscript/poputchka-collector.user.js`
    через Tampermonkey), открыть `web.telegram.org`, войти аккаунтом заказчика.
 3. В попапе задать `serverUrl` и `token`, **whitelist из 1–2 чатов** (всё остальное расширение
    не читает вообще), `intervalSec = 180`, `confirmMode = ON`.

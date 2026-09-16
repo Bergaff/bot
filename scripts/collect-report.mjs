@@ -31,6 +31,27 @@ function plural(n, one, few, many) {
 /** Порог «чат давно не проверяли» в часах. */
 export const DEFAULT_STALE_HOURS = 6;
 
+/** Дата из ответа сервера: sqlite пишет «YYYY-MM-DD HH:MM:SS», API может отдать ISO. */
+function toDate(raw) {
+  if (!raw) return null;
+  const text = String(raw);
+  const d = new Date(text.includes('T') ? text : text.replace(' ', 'T') + 'Z');
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Сколько часов назад (или null, если дата не разобрана). */
+function ageHours(raw, now) {
+  const d = toDate(raw);
+  return d ? (now.getTime() - d.getTime()) / 3600000 : null;
+}
+
+/** «12 мин», «3 ч», «2 дн» — для строк отчёта. */
+function fmtAge(hours) {
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))} мин`;
+  if (hours < 48) return `${Math.round(hours)} ч`;
+  return `${Math.round(hours / 24)} дн`;
+}
+
 /**
  * Разбор ответа сервера в список проблем и строк отчёта — чистая функция,
  * чтобы её можно было проверить тестами без сети.
@@ -64,22 +85,29 @@ export function summarize(status, chats, opts = {}) {
   if (s.extensionToday) {
     lines.push(`расширение за сутки: принято ${s.extensionToday.messages ?? 0} сообщений, создано ${s.extensionToday.created ?? 0} заявок`);
   }
+  const reportAge = report ? (ageHours(report.finishedAt, now) ?? ageHours(report.startedAt, now)) : null;
   lines.push(report
-    ? `последний прогон: ${report.startedAt}${report.dryRun ? ' (dry run)' : ''}`
+    ? `последний прогон: ${report.startedAt}${report.dryRun ? ' (dry run)' : ''}` +
+      (reportAge !== null ? ` — ${fmtAge(reportAge)} назад` : '')
     : 'последний прогон: ещё не запускался');
   if (totals) {
     lines.push(`итоги прогона: чатов ${totals.chats}, найдено ${totals.fetched}, новых ${totals.new}, ` +
       `заявок ${totals.created}, дублей ${totals.duplicate}, отсеяно ${totals.skipped}, ошибок ${totals.errors}`);
   }
 
-  if (!s.ingestTokenSet) problems.push({ kind: 'token', text: 'INGEST_TOKEN не задан: расширение получает 503, приём выключен' });
-  if ((ai.collectLeft ?? 0) <= 0) warnings.push({ kind: 'quota', text: `Дневная квота ИИ сборщика выбрана (${ai.collectUsedToday ?? 0}/${ai.collectLimit ?? 0}) — разбираем только правилами` });
-  if ((ai.ingestLeft ?? 0) <= 0) warnings.push({ kind: 'quota', text: 'Дневная квота ИИ расширения выбрана — расширение разбирает только правилами' });
+  /* Если ответа сервера нет вовсе (status пуст), выдумывать проблемы не нужно:
+     про нули квот и отсутствие токена мы ничего не знаем. */
+  if (status && typeof status === 'object') {
+    if (!s.ingestTokenSet) problems.push({ kind: 'token', text: 'INGEST_TOKEN не задан: расширение получает 503, приём выключен' });
+    if ((ai.collectLeft ?? 0) <= 0) warnings.push({ kind: 'quota', text: `Дневная квота ИИ сборщика выбрана (${ai.collectUsedToday ?? 0}/${ai.collectLimit ?? 0}) — разбираем только правилами` });
+    if ((ai.ingestLeft ?? 0) <= 0) warnings.push({ kind: 'quota', text: 'Дневная квота ИИ расширения выбрана — расширение разбирает только правилами' });
+  }
 
   /* По чатам */
+  let checkedRecently = false;
   for (const c of list) {
-    const lastChecked = c.lastCheckedAt ? new Date(String(c.lastCheckedAt).includes('T') ? c.lastCheckedAt : String(c.lastCheckedAt).replace(' ', 'T') + 'Z') : null;
-    const ageHours = lastChecked ? (now.getTime() - lastChecked.getTime()) / 3600000 : null;
+    const checked = ageHours(c.lastCheckedAt, now);
+    if (c.enabled && checked !== null && checked <= staleHours) checkedRecently = true;
     const flags = [];
 
     if (!c.enabled) flags.push('выключен');
@@ -92,11 +120,11 @@ export function summarize(status, chats, opts = {}) {
     } else if (c.lastError) {
       problems.push({ kind: 'errors', text: `${c.username}: ${c.lastError} (попыток подряд: ${c.errorCount ?? 0})` });
     }
-    if (c.enabled && ageHours !== null && ageHours > staleHours) {
-      problems.push({ kind: 'stale', text: `${c.username}: не проверяли ${Math.round(ageHours)} ч (порог ${staleHours} ч) — cron не запускается?` });
-      flags.push(`не проверяли ${Math.round(ageHours)} ч`);
+    if (c.enabled && checked !== null && checked > staleHours) {
+      problems.push({ kind: 'stale', text: `${c.username}: не проверяли ${Math.round(checked)} ч (порог ${staleHours} ч) — cron не запускается?` });
+      flags.push(`не проверяли ${Math.round(checked)} ч`);
     }
-    if (c.enabled && ageHours === null) flags.push('ещё не проверялся');
+    if (c.enabled && checked === null) flags.push('ещё не проверялся');
 
     lines.push(`  ${c.username} [${c.kind}] ${c.enabled ? 'вкл' : 'выкл'} · курсор ${c.lastMessageId ?? '—'} · ` +
       `найдено ${c.statsFound ?? 0} / заявок ${c.statsCreated ?? 0} / отсеяно ${c.statsSkipped ?? 0}` +
@@ -105,6 +133,34 @@ export function summarize(status, chats, opts = {}) {
 
   if (totals && totals.chats > 0 && totals.created === 0 && totals.duplicate === 0) {
     warnings.push({ kind: 'empty', text: `Прогон прошёл по ${totals.chats} чатам, но не создал ни одной заявки (найдено ${totals.fetched}, отсеяно ${totals.skipped})` });
+  }
+
+  /* Ошибки последнего прогона: состояние чатов могли уже сбросить, а прогон — нет.
+     Проблемой это не делаем (иначе чиненный чат «фонил» бы до следующего обхода). */
+  if (totals && ((totals.errors ?? 0) > 0 || (totals.disabled ?? 0) > 0)) {
+    warnings.push({
+      kind: 'errors',
+      text: `В последнем прогоне ошибок: ${totals.errors ?? 0}, авто-отключений: ${totals.disabled ?? 0}` +
+        ((totals.disabled ?? 0) > 0 ? ' — выключенные чаты нужно включить обратно после починки' : ''),
+    });
+  }
+
+  /* Обход включён, а прогона давно не было (или не было вовсе) и ни один чат не проверен —
+     типичный признак мертвого cron. Отдельные «stale» по чатам уже могли об этом сказать. */
+  const perChatStale = problems.some((pr) => pr.kind === 'stale');
+  const hasEnabled = list.some((c) => c.enabled);
+  if (s.enabled && hasEnabled && !perChatStale && !checkedRecently && (reportAge === null || reportAge > staleHours)) {
+    problems.push({
+      kind: 'stale',
+      text: reportAge === null
+        ? `cron-сборщик включён, но прогона ещё не было, а ${list.length} ${plural(list.length, 'чат', 'чата', 'чатов')} в обходе ни разу не проверено`
+        : `cron-сборщик включён, но прогона не было ${fmtAge(reportAge)} (порог ${staleHours} ч) и ни один чат не проверен — cron не запускается?`,
+    });
+  }
+
+  /* Чатов нет вовсе — авто-сбор фактически не работает. */
+  if (status && typeof status === 'object' && (wc.total ?? 0) === 0) {
+    warnings.push({ kind: 'empty', text: 'В обходе нет ни одного чата: добавьте через админку или POST /api/admin/watch-chats' });
   }
 
   const failing = problems.filter((p) => failOn.has(p.kind));
@@ -137,10 +193,19 @@ export function formatReport(summary) {
     for (const p of summary.problems) out.push(`  × [${p.kind}] ${p.text}`);
   }
   out.push('');
-  out.push(summary.ok
-    ? `Всё в порядке (${summary.chats} ${plural(summary.chats, 'чат', 'чата', 'чатов')} в обходе).`
-    : `Нужно вмешательство: ${summary.failing.length} ${plural(summary.failing.length, 'проблема', 'проблемы', 'проблем')} ` +
-        `из списка --fail-on ${summary.failOn.join(',')}.`);
+  const chatsWord = `${summary.chats} ${plural(summary.chats, 'чат', 'чата', 'чатов')} в обходе`;
+  if (!summary.ok) {
+    out.push(`Нужно вмешательство: ${summary.failing.length} ${plural(summary.failing.length, 'проблема', 'проблемы', 'проблем')} ` +
+      `из списка --fail-on ${summary.failOn.join(',')}.`);
+  } else if (summary.problems.length || summary.warnings.length) {
+    // код возврата 0, но смотреть на отчёт нужно: проблемы вне --fail-on и/или предупреждения
+    const parts = [];
+    if (summary.problems.length) parts.push(`проблем вне --fail-on: ${summary.problems.length}`);
+    if (summary.warnings.length) parts.push(`предупреждений: ${summary.warnings.length}`);
+    out.push(`Сбор работает (${chatsWord}), но ${parts.join(', ')} — смотрите списки выше.`);
+  } else {
+    out.push(`Всё в порядке (${chatsWord}).`);
+  }
   return out.join('\n');
 }
 

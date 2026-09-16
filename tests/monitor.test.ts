@@ -132,6 +132,87 @@ describe('summarize: что считается проблемой', () => {
   });
 });
 
+describe('summarize: сигнал из последнего прогона и «мёртвый cron»', () => {
+  const runWith = (totals: Record<string, unknown>, over: Record<string, unknown> = {}) =>
+    status({ lastReport: { startedAt: '2026-09-16T13:20:49Z', totals, ...over } });
+
+  const OK_TOTALS = { chats: 2, fetched: 6, new: 6, created: 3, duplicate: 0, skipped: 3, invalid: 0, errors: 0, disabled: 0, fetches: 2 };
+
+  it('строка последнего прогона показывает, сколько времени прошло', () => {
+    const s = summarize(runWith(OK_TOTALS), [chat()], { now: NOW });
+    expect(s.lines.join('\n')).toMatch(/последний прогон: 2026-09-16T13:20:49Z — 39 мин назад/);
+  });
+
+  it('ошибки в последнем прогоне — предупреждение, а не проблема (чат могли уже починить)', () => {
+    const s = summarize(runWith({ ...OK_TOTALS, errors: 1 }), [chat()], { now: NOW, failOn: 'errors' });
+    expect(s.problems).toEqual([]);
+    expect(s.ok).toBe(true);
+    expect(s.warnings.map((w) => w.kind)).toEqual(['errors']);
+    expect(s.warnings[0]!.text).toContain('В последнем прогоне ошибок: 1');
+  });
+
+  it('авто-отключение в прогоне — предупреждение с подсказкой включить обратно', () => {
+    const s = summarize(runWith({ ...OK_TOTALS, disabled: 1 }), [chat()], { now: NOW });
+    expect(s.warnings[0]!.text).toContain('нужно включить обратно');
+  });
+
+  it('cron включён, прогона ещё не было и чаты не проверены — проблема stale', () => {
+    const s = summarize(status({ lastReport: null }), [chat({ lastCheckedAt: null })], { now: NOW, failOn: 'stale' });
+    expect(s.ok).toBe(false);
+    expect(s.problems.map((p) => p.kind)).toEqual(['stale']);
+    expect(s.problems[0]!.text).toContain('прогона ещё не было');
+    expect(s.problems[0]!.text).toContain('1 чат в обходе');
+  });
+
+  it('прогон был давно и ни один чат не проверен — проблема stale с возрастом', () => {
+    const s = summarize(
+      status({ lastReport: { startedAt: '2026-09-16T04:00:00Z', totals: null } }),
+      [chat({ lastCheckedAt: null }), chat({ username: 'durov', lastCheckedAt: null })],
+      { now: NOW, staleHours: 6, failOn: 'stale' },
+    );
+    expect(s.problems.map((p) => p.kind)).toEqual(['stale']);
+    expect(s.problems[0]!.text).toContain('10 ч');
+    expect(s.problems[0]!.text).toContain('cron не запускается');
+  });
+
+  it('прогон свежий, а чаты ещё не проверялись — проблемы нет', () => {
+    const s = summarize(runWith(OK_TOTALS), [chat({ lastCheckedAt: null })], { now: NOW, failOn: 'stale' });
+    expect(s.problems).toEqual([]);
+    expect(s.ok).toBe(true);
+  });
+
+  it('когда stale найден по конкретным чатам, общая проблема не дублируется', () => {
+    const s = summarize(
+      status({ lastReport: { startedAt: '2026-09-16T01:00:00Z', totals: null } }),
+      [chat({ lastCheckedAt: '2026-09-16 01:00:00' }), chat({ username: 'durov', lastCheckedAt: '2026-09-16 02:00:00' })],
+      { now: NOW, staleHours: 6, failOn: 'stale' },
+    );
+    expect(s.problems).toHaveLength(2);
+    expect(s.problems.map((p) => p.text)).toEqual([
+      expect.stringContaining('drivers_pl_by: не проверяли 13 ч'),
+      expect.stringContaining('durov: не проверяли 12 ч'),
+    ]);
+  });
+
+  it('обход выключен — «мёртвый cron» не мешает', () => {
+    const s = summarize(status({ enabled: false, lastReport: null }), [chat({ lastCheckedAt: null })], { now: NOW, failOn: 'stale' });
+    expect(s.problems).toEqual([]);
+    expect(s.lines.join('\n')).toContain('cron-сборщик: ВЫКЛЮЧЕН');
+  });
+
+  it('в обходе нет ни одного чата — предупреждение empty', () => {
+    const s = summarize(status({ watchChats: { total: 0, enabled: 0, withErrors: 0 } }), [], { now: NOW });
+    expect(s.warnings.map((w) => w.kind)).toEqual(['empty']);
+    expect(s.warnings[0]!.text).toContain('нет ни одного чата');
+  });
+
+  it('сервер не ответил — проблем и предупреждений из пустого ответа не выдумываем', () => {
+    const s = summarize(null, null, { now: NOW });
+    expect(s.warnings).toEqual([]);
+    expect(s.problems).toEqual([]);
+  });
+});
+
 describe('formatReport: то, что видит дежурный', () => {
   it('здоровый отчёт', () => {
     const text = formatReport(summarize(status(), [chat(), chat({ username: 'durov' })], { now: NOW }));
@@ -151,6 +232,21 @@ describe('formatReport: то, что видит дежурный', () => {
     expect(text).toContain('Проблемы:');
     expect(text).toContain('× [errors] drivers_pl_by: blocked: капча');
     expect(text).toContain('Нужно вмешательство: 1 проблема из списка --fail-on errors,disabled.');
+  });
+
+  it('код возврата 0, но есть предупреждения — итоговая строка об этом говорит', () => {
+    const text = formatReport(summarize(
+      status({ lastReport: { startedAt: '2026-09-16T13:20:49Z', totals: { chats: 2, fetched: 4, new: 4, created: 1, duplicate: 0, skipped: 3, errors: 1, disabled: 0 } } }),
+      [chat()],
+      { now: NOW },
+    ));
+    expect(text).toContain('Сбор работает (1 чат в обходе), но предупреждений: 1 — смотрите списки выше.');
+    expect(text).not.toContain('Всё в порядке');
+  });
+
+  it('проблема вне --fail-on — тоже не «всё в порядке»', () => {
+    const text = formatReport(summarize(status({ ingestTokenSet: false }), [chat()], { now: NOW }));
+    expect(text).toContain('проблем вне --fail-on: 1');
   });
 
   it('склонение числа проблем', () => {

@@ -1,0 +1,80 @@
+name: Мониторинг авто-сбора
+
+# Сводка состояния авто-сбора (этап 7): тот же отчёт, что печатает
+# `node scripts/collect-report.mjs`, но по расписанию и с ненулевым кодом
+# возврата, если есть проблемы — GitHub пришлёт письмо о упавшем прогоне.
+#
+# Включится, когда в настройках репозитория заданы:
+#   Settings → Secrets and variables → Actions → Variables: COLLECT_REPORT_URL
+#   Settings → Secrets and variables → Actions → Secrets:   COLLECT_ADMIN_TOKEN
+#
+# Расписание работает только из default-ветки (main), поэтому до слияния
+# воркфайл можно запускать руками: Actions → «Мониторинг авто-сбора» → Run workflow.
+
+on:
+  schedule:
+    - cron: '25 */3 * * *'   # через ~8 минут после обхода воркера (COLLECT_CRON=17 */2 * * *)
+  workflow_dispatch:
+    inputs:
+      stale_hours:
+        description: 'Порог «чат давно не проверяли», часов'
+        required: false
+        default: '6'
+      fail_on:
+        description: 'За что падать (через запятую)'
+        required: false
+        default: 'errors,disabled,stale,token'
+
+permissions:
+  contents: read
+
+env:
+  NODE_NO_WARNINGS: '1'
+
+jobs:
+  report:
+    name: Сводка состояния
+    runs-on: ubuntu-latest
+    if: ${{ vars.COLLECT_REPORT_URL != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # npm ci не нужен: scripts/collect-report.mjs работает на чистом Node
+      - name: collect-report
+        env:
+          REPORT_URL: ${{ vars.COLLECT_REPORT_URL }}
+          ADMIN_TOKEN: ${{ secrets.COLLECT_ADMIN_TOKEN }}
+          STALE_HOURS: ${{ inputs.stale_hours || '6' }}
+          FAIL_ON: ${{ inputs.fail_on || 'errors,disabled,stale,token' }}
+        run: |
+          if [ -z "$ADMIN_TOKEN" ]; then
+            echo "Нет секрета COLLECT_ADMIN_TOKEN (= ADMIN_API_TOKEN сервера) — сводку не снять."
+            echo "Добавьте его в Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+          set +e
+          node scripts/collect-report.mjs \
+            --url "$REPORT_URL" --token "$ADMIN_TOKEN" \
+            --stale-hours "$STALE_HOURS" --fail-on "$FAIL_ON" | tee report.txt
+          code=${PIPESTATUS[0]}
+          set -e
+
+          {
+            echo "## Авто-сбор: сводка на $(date -u +'%Y-%m-%d %H:%M') UTC"
+            echo
+            echo '```text'
+            cat report.txt
+            echo '```'
+            echo
+            if [ "$code" -ne 0 ]; then
+              echo "⚠️ Есть проблемы (код возврата $code). Что делать — \`docs/rollout.md\`, раздел 6 «Тюнинг» и раздел 7 «Как остановить»."
+            else
+              echo "✅ Проблем нет."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$code"

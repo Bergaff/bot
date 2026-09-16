@@ -19,6 +19,9 @@
     "fixture": "node scripts/fetch-fixture.mjs",
     "build:ext": "node scripts/build-extension.mjs"
   },
+  "engines": {
+    "node": ">=22.18"
+  },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
     "hono": "^4.6.14"

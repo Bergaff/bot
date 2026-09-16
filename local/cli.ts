@@ -39,6 +39,15 @@ import type { Env } from '../src/types.ts';
 const ROOT = resolve(import.meta.dirname ?? '.', '..');
 const DB_PATH = process.env.COLLECT_DB ?? resolve(ROOT, '.data/collector.db');
 
+// Пайп может закрыться раньше, чем мы допечатаем (`… | head -2`, `… | grep -q`):
+// EPIPE не должен ронять CLI с «Unhandled 'error' event» — просто перестаём писать.
+let stdoutOpen = true;
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') stdoutOpen = false;
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /* Мелочи CLI                                                           */
 /* ------------------------------------------------------------------ */
@@ -69,7 +78,7 @@ function env(args: Args): Env & { close: () => void } {
   return createLocalEnv({ dbPath: args.flags.db ? String(args.flags.db) : DB_PATH, vars });
 }
 
-function line(s = ''): void { process.stdout.write(s + '\n'); }
+function line(s = ''): void { if (stdoutOpen) process.stdout.write(s + '\n'); }
 
 function truncate(s: string, n: number): string {
   const one = s.replace(/\s+/g, ' ').trim();

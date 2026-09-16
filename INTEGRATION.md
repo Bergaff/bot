@@ -26,6 +26,7 @@
 | `scripts/collect-report.mjs` | `scripts/collect-report.mjs` | как есть: сводка состояния для мониторинга (этап 7) |
 | `parcel/app-auto-collect.js` | ✂️ вставить в `public/app.js` | не отдельным файлом — `app.js` грузится как модуль (раздел 4) |
 | `docs/rollout.md` | `docs/rollout.md` | runbook обкатки; пути к скриптам после переноса не меняются |
+| `docs/ci/ci.yml`, `docs/ci/monitor.yml` | ✂️ `.github/workflows/` | скопировать вручную: бот песочницы не имеет права `workflows` (`docs/ci/README.md`) |
 | `parcel/demo/` | не копировать | демо-панель для проверки UI до правки прод-файла |
 | `local/`, `scripts/` (остальное), `tests/fixtures/` | не копировать | локальный CLI, sqlite-замена D1/KV, зеркало `t.me/s/` |
 | `tests/*.test.ts` | скопировать все | ✂️ в `tests/collect.test.ts` и `tests/ingest*.test.ts` заменить `createLocalEnv()` из `local/sqlite-env.ts` на вашу mock-`env` (или оставить sqlite — в воркер он не попадёт) |
@@ -320,7 +321,20 @@ node scripts/collect-report.mjs --url https://pop-utka.app --token $ADMIN_API_TO
 ```
 
 Оба работают и против локального зеркала (`--base-url http://127.0.0.1:8899/s` у разведки),
-поэтому обкатку можно прогнать без интернета: `node local/mock-tme.mjs`.
+поэтому обкатку можно прогнать без интернета: `node local/mock-tme.mjs`. Ровно этот сценарий
+(зеркало → разведка → dry run → боевой прогон → сброс курсора → дубликаты) на каждом пуше
+прогоняет воркфайл `docs/ci/ci.yml`, job `smoke`.
+
+Воркфайлы из `docs/ci/`:
+
+| Файл | Переносить в `parcel`? | Что делает |
+|---|---|---|
+| `docs/ci/ci.yml` | job `smoke` — по желанию | типы, тесты, сборка бандла клиента и сквозной прогон на зеркале фикстур |
+| `docs/ci/monitor.yml` | **да**, если хотите алерты | сводка `collect-report.mjs` каждые 3 часа; падает при проблемах → письмо от GitHub. Нужны переменная `COLLECT_REPORT_URL` и секрет `COLLECT_ADMIN_TOKEN`; пока переменной нет, job пропускается |
+
+Кладутся в `.github/workflows/` вручную (`cp docs/ci/*.yml .github/workflows/`): у бота песочницы
+нет права `workflows`, подробности — [`docs/ci/README.md`](docs/ci/README.md).
+Расписание в `monitor.yml` работает только из default-ветки, то есть после слияния в `main`.
 
 В `parcel` скрипты переносятся как есть (они не зависят от Worker API), а в `package.json`
 удобно добавить:
