@@ -350,13 +350,17 @@ server.listen(PORT, HOST, () => {
   }
   console.log(`  зеркало t.me/s/ (для проверки): http://127.0.0.1:${PORT}/mirror/s/durov`);
   console.log(`  настоящий API: /api/admin/watch-chats, /api/admin/collect, /api/admin/collect/status, /api/ingest`);
+  console.log('  панель как пульт расширения: GET/PUT /api/admin/extension[/config], GET /api/admin/ingest/log');
+  console.log('  (расширение дёргает их само: GET /api/extension/config, POST /api/extension/heartbeat)');
   console.log('');
   console.log('  Что вписать в попап расширения (иконка «попутка. — сбор объявлений»):');
   console.log(`    serverUrl : http://127.0.0.1:${PORT}`);
   console.log(`    token     : ${INGEST_TOKEN}`);
   console.log(`    админка   : http://localhost:${PORT}/  → вкладка «очередь», бейдж «расширение»`);
+  console.log(`    пульт     : http://localhost:${PORT}/  → вкладка «чаты» → «Аккаунт Telegram (расширение)»`);
+  console.log('                (кто подключён, белый список чатов и румов, журнал со ссылками на сообщения)');
   console.log('  Порядок: chrome://extensions → Режим разработчика → «Загрузить распакованное»');
-  console.log('  → папка extension/ → открыть https://web.telegram.org → «Диагностика вкладки».');
+  console.log('  → папка extension/ → открыть https://web.telegram.org → в попапе «Самопроверка».');
   console.log('  Подробно и с таблицей ошибок: docs/try-it.md');
 });
 

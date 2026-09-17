@@ -147,6 +147,10 @@ describe('какой чат открыт', () => {
       title: 'Водители Польша–Беларусь',
       username: 'drivers_pl_by',
       id: null,
+      kind: null,
+      groupTitle: null,
+      topicTitle: null,
+      topicId: null,
     });
     expect(core.chatKeyOf(dom.readChatInfo(doc, location))).toBe('web:drivers_pl_by');
   });
@@ -156,8 +160,31 @@ describe('какой чат открыт', () => {
       .append(new FakeNode('div', { className: 'peer-title', text: 'Семейный чат' }));
     const { doc, location } = fakeDocument(root, 'https://web.telegram.org/a/#/im/p-1001234567890');
     const chat = dom.readChatInfo(doc, location);
-    expect(chat).toEqual({ title: 'Семейный чат', username: null, id: '-1001234567890' });
+    expect(chat).toMatchObject({ title: 'Семейный чат', username: null, id: '-1001234567890', kind: 'supergroup' });
     expect(core.chatKeyOf(chat)).toBe('ext:-1001234567890');
+  });
+
+  it('рум (топик) форум-чата виден по адресу вкладки — во всех формах клиента', () => {
+    const root = () => new FakeNode('div', { className: 'chat-info' })
+      .append(new FakeNode('div', { className: 'peer-title', text: 'Водители Польша–Беларусь' }));
+    const forms: Array<[string, number]> = [
+      ['https://web.telegram.org/k/#-1001234567890_7', 7],          // Web K
+      ['https://web.telegram.org/a/#/im/p-1001234567890_12', 12],   // Web A
+      ['https://web.telegram.org/a/#/im?p=g1234567890&thread=3', 3],// Web A, ?thread=
+    ];
+    for (const [url, topicId] of forms) {
+      const { doc, location } = fakeDocument(root(), url);
+      const chat = dom.readChatInfo(doc, location);
+      expect(chat.topicId, url).toBe(topicId);
+      expect(chat.id, url).toBeTruthy();
+      expect(core.chatKeyOf(chat), url).toBe('ext:-1001234567890');
+    }
+    // публичный чат: peer-id в адресе нет, зато есть юзернейм — ключ web:<username>
+    const pub = fakeDocument(root(), 'https://web.telegram.org/k/#@drivers_pl_by?topic=5');
+    const pubChat = dom.readChatInfo(pub.doc, pub.location);
+    expect(pubChat.topicId).toBe(5);
+    expect(pubChat.username).toBe('drivers_pl_by');
+    expect(core.chatKeyOf(pubChat)).toBe('web:drivers_pl_by');
   });
 
   it('название берётся из заголовка вкладки, если шапки чата в DOM нет', () => {

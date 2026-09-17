@@ -18,17 +18,32 @@
 (function () {
   'use strict';
 
-  const core = (typeof PoputkaCore !== 'undefined') ? PoputkaCore : require('./core.cjs');
-  const dom = (typeof PoputkaDom !== 'undefined') ? PoputkaDom : require('./dom.cjs');
-  const parser = (typeof PoputkaParser !== 'undefined') ? PoputkaParser : null;
+  /* Слушатель сообщений регистрируется ПЕРВЫМ делом: даже если что-то ниже
+   * упадёт, попап получит ответ с текстом ошибки, а не «вкладка не отвечает». */
+  const boot = { version: '1.0.0', startedAt: Date.now(), ok: false, error: null };
+
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+      (async () => {
+        try {
+          sendResponse(await handleMessage(msg));
+        } catch (e) {
+          try { sendResponse({ ok: false, boot, error: String(e && e.message || e) }); } catch { /* канал закрыт */ }
+        }
+      })();
+      return true; // ответ асинхронный
+    });
+  }
+
+  let core = null;
+  let dom = null;
+  let parser = null;
+  let store = null;
 
   const NS = 'poputchka';
-  const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local)
-    ? core.chromeStore(NS)
-    : core.localStore(NS);
 
   const state = {
-    settings: core.withDefaults({}),
+    settings: { whitelist: [], intervalSec: 120, batchSize: 20, maxPerChat: 30, confirmMode: true, paused: false, maxAgeHours: 72, requireContact: false, serverUrl: '', token: '' },
     counters: {},
     sentKeys: [],
     pending: [],          // найдено, но ждёт подтверждения (confirmMode)
@@ -39,7 +54,29 @@
     timer: null,
     lastDiagnostic: null,
     unreadable: false,
+    clientId: null,       // метка этого браузера для панели (heartbeat)
+    lastChat: null,       // какой чат/рум видели последним
+    configFromServer: false,
+    configError: null,
   };
+
+  try {
+    core = (typeof PoputkaCore !== 'undefined') ? PoputkaCore : require('./core.cjs');
+    dom = (typeof PoputkaDom !== 'undefined') ? PoputkaDom : require('./dom.cjs');
+    parser = (typeof PoputkaParser !== 'undefined') ? PoputkaParser : null;
+    store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local)
+      ? core.chromeStore(NS)
+      : core.localStore(NS);
+    state.settings = core.withDefaults({});
+  } catch (e) {
+    boot.error = 'не удалось загрузить ядро сборщика: ' + String(e && e.message || e) +
+      ' (переустановите расширение: chrome://extensions → «Обновить», затем F5 на web.telegram.org)';
+  }
+
+  /** Состояние для попапа — даже если часть модулей не загрузилась. */
+  function safeState() {
+    try { return publicState(); } catch (e) { return { error: String(e && e.message || e) }; }
+  }
 
   /* ---------------------------------------------------------------- */
   /* Хранилище                                                         */
@@ -50,6 +87,15 @@
     state.settings = core.withDefaults(saved.settings);
     state.counters = saved.counters || {};
     state.sentKeys = Array.isArray(saved.sentKeys) ? saved.sentKeys : [];
+    state.clientId = saved.clientId || newClientId();
+  }
+
+  /** Метка этого браузера: панель показывает, какие аккаунты подключены. */
+  function newClientId() {
+    const rnd = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
+    return String(rnd).slice(0, 36);
   }
 
   async function persist() {
@@ -57,6 +103,13 @@
       settings: state.settings,
       counters: state.counters,
       sentKeys: core.pruneSentLog(state.sentKeys),
+      clientId: state.clientId,
+      // отметка «я жив» — по ней попап объясняет «вкладка не отвечает»
+      alive: {
+        at: Date.now(), ok: boot.ok, error: boot.error, version: boot.version,
+        url: (typeof location !== 'undefined' && location.href) || null,
+        status: state.status,
+      },
     });
   }
 
@@ -153,25 +206,41 @@
   /* ---------------------------------------------------------------- */
 
   async function tick() {
-    if (state.settings.paused) { state.status = 'пауза'; render(); return; }
+    if (!core || !dom) { state.error = boot.error; render(); return; }
+
+    // настройки может задавать панель (белый список чатов и румов, интервал, пауза)
+    await syncConfig();
+
+    if (state.settings.paused) { state.status = 'пауза'; render(); await postHeartbeat(); return; }
     if (Date.now() < state.backoffUntil) {
       state.status = 'ждем: ' + (state.backoffUntil === Infinity ? 'остановлено' : Math.ceil((state.backoffUntil - Date.now()) / 1000) + ' с');
       render();
+      await postHeartbeat();
       return;
     }
 
     const chat = dom.readChatInfo(document, window.location);
     const chatKey = core.chatKeyOf(chat);
     const whitelisted = core.matchesWhitelist(chat, state.settings.whitelist);
+    state.lastChat = {
+      chatKey: chatKey, title: chat.title, username: chat.username, kind: chat.kind,
+      groupTitle: chat.groupTitle, topicTitle: chat.topicTitle, topicId: chat.topicId,
+      whitelisted: whitelisted, at: new Date().toISOString(),
+    };
 
     if (!chatKey || !whitelisted) {
       // всё, что не в белом списке, игнорируется ПОЛНОСТЬЮ — сообщения не читаем
+      const note = chatKey ? core.whitelistMismatch(chat, state.settings.whitelist) : null;
       state.unreadable = false;
-      state.status = chat.title
-        ? `чат «${chat.title}» не в белом списке — пропускаем`
-        : 'чат не определён (откройте диалог)';
-      state.lastDiagnostic = { url: location.href, chat, chatKey, whitelisted, total: 0, toSend: 0 };
+      state.status = !chatKey
+        ? 'чат не определён (откройте диалог)'
+        : (note || `чат «${chat.title || chatKey}» не в белом списке — пропускаем`);
+      state.lastDiagnostic = {
+        url: location.href, chat, chatKey, whitelisted, whitelistNote: note, total: 0, toSend: 0,
+      };
       render();
+      await persist();
+      await postHeartbeat();
       return;
     }
 
@@ -217,6 +286,7 @@
       state.status = `чат «${chat.title}»: прочитано ${harvested.messages.length}, нового нет`;
       await persist();
       render();
+      await postHeartbeat();
       return;
     }
 
@@ -226,12 +296,94 @@
       state.status = `найдено ${fresh.length} — подтвердите отправку`;
       await persist();
       render();
+      await postHeartbeat();
       return;
     }
 
     state.status = `найдено ${fresh.length} — отправляю`;
     render();
     await sendPending({ messages: fresh });
+    await postHeartbeat();
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Связь с панелью: настройки оттуда и отметка «аккаунт подключён»    */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Забрать настройки из панели (белый список чатов и румов, интервал, пауза).
+   * Сервер без этих ручек отвечает 404 — тогда работаем на локальных настройках.
+   */
+  async function syncConfig() {
+    if (!state.settings.serverUrl || !state.settings.token) return null;
+    try {
+      const res = await fetch(state.settings.serverUrl + '/api/extension/config', {
+        headers: { Authorization: 'Bearer ' + state.settings.token },
+        cache: 'no-store',
+      });
+      if (!res.ok) { state.configFromServer = false; return null; }
+      const body = await res.json().catch(() => null);
+      const cfg = body && body.config;
+      if (!cfg) { state.configFromServer = false; return null; }
+      return await applyConfig(cfg);
+    } catch (e) {
+      state.configError = 'Настройки из панели не получены: ' + String(e && e.message || e);
+      return null;
+    }
+  }
+
+  /** Применить настройки, присланные панелью (белый список чатов и румов, интервал, пауза). */
+  async function applyConfig(cfg) {
+    if (!cfg || typeof cfg !== 'object') { state.configFromServer = false; return null; }
+    const before = JSON.stringify(state.settings);
+    if (Array.isArray(cfg.whitelist) || typeof cfg.whitelist === 'string') {
+      const list = typeof cfg.whitelist === 'string' ? cfg.whitelist.split(/[\n,;]+/) : cfg.whitelist;
+      state.settings.whitelist = list.map((x) => String(x).trim()).filter(Boolean);
+    }
+    if (cfg.intervalSec != null) {
+      state.settings.intervalSec = core.clamp(Number(cfg.intervalSec) || 120, 60, 600);
+      restartTimer(); // интервал мог измениться
+    }
+    if (typeof cfg.paused === 'boolean') state.settings.paused = cfg.paused;
+    state.configFromServer = true;
+    state.configError = null;
+    if (JSON.stringify(state.settings) !== before) { await persist(); render(); }
+    return cfg;
+  }
+
+  /** Отметка для панели: аккаунт подключён, такой-то чат/рум, такие-то счётчики. */
+  async function postHeartbeat() {
+    if (!state.settings.serverUrl || !state.settings.token) return;
+    try {
+      const res = await fetch(state.settings.serverUrl + '/api/extension/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + state.settings.token },
+        body: JSON.stringify({
+          clientId: state.clientId || newClientId(),
+          collector: core.COLLECTOR,
+          at: new Date().toISOString(),
+          url: location.href,
+          chat: state.lastChat,
+          counters: state.counters,
+          status: state.status,
+          error: state.error,
+          pending: state.pending.length,
+          unreadable: state.unreadable,
+          whitelist: state.settings.whitelist,
+          intervalSec: state.settings.intervalSec,
+          paused: state.settings.paused,
+          confirmMode: state.settings.confirmMode,
+        }),
+        cache: 'no-store',
+      });
+      // настройки панель отдаёт вместе с ответом на отметку — одним запросом
+      if (res && res.ok) {
+        const body = await res.json().catch(() => null);
+        if (body && body.config) await applyConfig(body.config);
+      }
+    } catch {
+      // панель не увидит отметку — это не повод останавливать сбор
+    }
   }
 
   /* ---------------------------------------------------------------- */
@@ -396,23 +548,32 @@
     render();
   }
 
-  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-      (async () => {
-        if (!msg || !msg.type) return sendResponse({ ok: false });
-        if (msg.type === 'pk:reload') { await reloadSettings(); return sendResponse({ ok: true, state: publicState() }); }
-        if (msg.type === 'pk:state') return sendResponse({ ok: true, state: publicState() });
-        if (msg.type === 'pk:diagnostic') { await tick(); return sendResponse({ ok: true, diagnostic: core.diagnostic(state.lastDiagnostic), raw: state.lastDiagnostic }); }
-        if (msg.type === 'pk:pause') { state.settings.paused = !state.settings.paused; await persist(); render(); return sendResponse({ ok: true, state: publicState() }); }
-        if (msg.type === 'pk:send') { await sendPending(); return sendResponse({ ok: true, state: publicState() }); }
-        if (msg.type === 'pk:reset') {
-          state.counters = {}; state.sentKeys = []; state.pending = []; state.error = null;
-          await persist(); render(); return sendResponse({ ok: true, state: publicState() });
-        }
-        return sendResponse({ ok: false });
-      })();
-      return true; // ответ асинхронный
-    });
+  /** Команды попапа. Отвечаем даже когда инициализация не удалась (boot.ok === false). */
+  async function handleMessage(msg) {
+    if (!msg || !msg.type) return { ok: false, boot };
+    if (msg.type === 'pk:ping') return { ok: boot.ok, boot, state: safeState() };
+    if (!boot.ok || !core) {
+      return { ok: false, boot, error: boot.error || 'контент-скрипт не инициализирован' };
+    }
+    if (msg.type === 'pk:reload') { await reloadSettings(); return { ok: true, boot, state: publicState() }; }
+    if (msg.type === 'pk:state') return { ok: true, boot, state: publicState() };
+    if (msg.type === 'pk:diagnostic') {
+      await tick();
+      return { ok: true, boot, diagnostic: core.diagnostic(state.lastDiagnostic), raw: state.lastDiagnostic, state: publicState() };
+    }
+    if (msg.type === 'pk:pause') {
+      state.settings.paused = !state.settings.paused;
+      await persist(); render(); await postHeartbeat();
+      return { ok: true, boot, state: publicState() };
+    }
+    if (msg.type === 'pk:send') { await sendPending(); await postHeartbeat(); return { ok: true, boot, state: publicState() }; }
+    if (msg.type === 'pk:sync') { const cfg = await syncConfig(); return { ok: true, boot, config: cfg, state: publicState() }; }
+    if (msg.type === 'pk:reset') {
+      state.counters = {}; state.sentKeys = []; state.pending = []; state.error = null;
+      await persist(); render();
+      return { ok: true, boot, state: publicState() };
+    }
+    return { ok: false, boot, error: 'неизвестная команда: ' + msg.type };
   }
 
   function publicState() {
@@ -423,13 +584,24 @@
       status: state.status,
       error: state.error,
       diagnostic: state.lastDiagnostic,
+      clientId: state.clientId,
+      chat: state.lastChat,
+      configFromServer: state.configFromServer,
+      configError: state.configError,
+      unreadable: state.unreadable,
+      version: boot.version,
     };
   }
 
   (async function init() {
+    if (!core || !dom) { boot.ok = false; try { render(); } catch { /* панель не важна */ } return; }
+    boot.ok = true;
     await loadState();
     render();
     restartTimer();
+    await persist();          // отметка «расширение живо в этой вкладке»
+    await syncConfig();
+    await postHeartbeat();
     // первый проход — не сразу: даём клиенту дорисовать список сообщений
     setTimeout(() => { tick().catch(() => undefined); }, 4000);
     console.info('[попутка.] сборщик запущен: интервал', state.settings.intervalSec + 'с',

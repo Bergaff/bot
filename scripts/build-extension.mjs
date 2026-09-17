@@ -57,13 +57,21 @@ const header = `// ==UserScript==
  *   localStorage.setItem('poputchka', JSON.stringify({ settings: {
  *     serverUrl: 'https://pop-utka.app',
  *     token: 'ВАШ_INGEST_TOKEN',
- *     whitelist: ['Водители Польша–Беларусь'],
+ *     // запись с '::' ограничивает один рум (топик) форум-чата — названием или id
+ *     whitelist: ['Водители Польша–Беларусь', 'Граница :: Очередь BY-PL', 'Граница :: 7'],
  *     intervalSec: 120, batchSize: 20, maxPerChat: 30,
  *     confirmMode: true, paused: false, maxAgeHours: 72, requireContact: false,
  *   }}));
  *   location.reload();
  *
  * Счётчики и лог отправленного живут там же; панель — справа внизу вкладки.
+ *
+ * Если на сервере заданы настройки из админки (вкладка «чаты» → «Аккаунт Telegram
+ * (расширение)»), они перекрывают локальные: клиент каждый проход спрашивает
+ * GET /api/extension/config и шлёт отметку POST /api/extension/heartbeat — по ней
+ * панель видит, что аккаунт на связи, какой чат и рум открыты и сколько принято.
+ * Ограничение юзерскрипта (@grant none): с https-страницы не достучаться до
+ * http://127.0.0.1 — для локальной отладки используйте расширение (extension/).
  */
 `;
 

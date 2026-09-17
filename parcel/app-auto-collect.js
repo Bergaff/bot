@@ -187,6 +187,7 @@ async function renderAutoCollect(container) {
         el('summary', { text: 'Отчёт последнего прогона и статус источников' }),
         autoCollectReport(status),
       ]) : null,
+      await renderExtensionHub(),
     ].filter(Boolean));
   } catch (e) {
     box.replaceChildren(el('p', { class: 'empty-note', text: `Авто-сбор не загрузился: ${e.message || e}` }));
@@ -283,3 +284,230 @@ function pendingOriginFilter(items, current, onPick) {
 
 /** Сбросить фильтр (например, после публикации всех заявок). */
 function resetOriginFilter() { adminOriginFilter = 'all'; }
+
+/* ------------------------------------------------------------------ *
+ * Аккаунт Telegram: расширение как подключённая сессия (вариант B)
+ *
+ * Авторизация Telegram остаётся в браузере заказчика — расширение читает
+ * DOM открытой вкладки web.telegram.org и присылает отметки сюда. Панель
+ * работает пультом: белый список чатов и румов, пауза, статус, журнал
+ * принятого со ссылками на сообщения (их модератор пересылает сам).
+ * ------------------------------------------------------------------ */
+
+/** Сколько минут без отметки считаем «нет связи» (интервал опроса до 600 с). */
+const EXT_STALE_MS = 12 * 60 * 1000;
+
+/** Когда расширение последний раз выходило на связь — по-человечески. */
+function extAgo(iso) {
+  const t = Date.parse(iso || '');
+  if (!Number.isFinite(t)) return '—';
+  const min = Math.round((Date.now() - t) / 60000);
+  if (min <= 0) return 'только что';
+  if (min < 60) return min + ' мин назад';
+  const h = Math.round(min / 60);
+  if (h < 48) return h + ' ч назад';
+  return Math.round(h / 24) + ' дн назад';
+}
+
+function extAlive(client) {
+  const t = Date.parse((client && client.at) || '');
+  return Number.isFinite(t) && (Date.now() - t) < EXT_STALE_MS;
+}
+
+/** Блок «Аккаунт Telegram (расширение)»: кто подключён, что читает, что принято. */
+async function renderExtensionHub() {
+  const box = el('section', { class: 'admin-block' });
+  box.replaceChildren(el('p', { class: 'empty-note', text: 'Загружаем аккаунты Telegram…' }));
+  try {
+    const [extRes, logRes] = await Promise.all([
+      adminApi('/api/admin/extension'),
+      adminApi('/api/admin/ingest/log?limit=30'),
+    ]);
+    const ext = extRes.ok ? await extRes.json() : { clients: [], config: null, ingestEnabled: true };
+    const log = logRes.ok ? await logRes.json() : { items: [] };
+    box.replaceChildren(...[
+      el('h3', { text: 'Аккаунт Telegram (расширение)' }),
+      el('p', {
+        class: 'muted',
+        text: 'Авторизация Telegram — в браузере: расширение читает открытую вкладку web.telegram.org (только чтение) ' +
+          'и присылает отметки сюда. Панель задаёт белый список чатов и румов, ставит паузу и показывает, что принято.',
+      }),
+      ext.clients && ext.clients.length ? extClientsList(ext.clients) : extNoClients(ext),
+      extConfigForm(ext.config),
+      ingestLogTable(log),
+    ].filter(Boolean));
+  } catch (e) {
+    box.replaceChildren(el('p', { class: 'empty-note', text: `Блок аккаунтов не загрузился: ${e.message || e}` }));
+  }
+  return box;
+}
+
+function extNoClients(ext) {
+  return el('p', {
+    class: 'empty-note',
+    text: ext.ingestEnabled === false
+      ? 'Приём выключен: на сервере не задан INGEST_TOKEN (wrangler secret put INGEST_TOKEN).'
+      : 'Ни один браузер ещё не подключился: отметок от расширения не было. Поставьте расширение ' +
+        '(chrome://extensions → «Загрузить распакованное расширение» → папка extension/), откройте ' +
+        'web.telegram.org, в попапе заполните serverUrl и token и нажмите «Самопроверка».',
+  });
+}
+
+/** Карточки подключённых браузеров: чат, рум, счётчики, состояние, ошибки. */
+function extClientsList(clients) {
+  return el('div', {}, clients.map((c) => {
+    const chat = c.chat || {};
+    const counters = c.counters || {};
+    const alive = extAlive(c);
+    const room = chat.topicTitle || (chat.topicId != null ? 'рум id ' + chat.topicId : null);
+    return el('article', { class: 'admin-card' }, [
+      el('p', { class: 'admin-contact' }, [
+        el('span', {
+          class: 'badge badge-origin ' + (alive ? 'badge-extension' : 'badge-collector'),
+          text: alive ? 'на связи' : 'нет связи',
+          title: 'Отметка получена ' + extAgo(c.at),
+        }),
+        el('span', {
+          text: ' ' + (chat.title || chat.chatKey || 'чат не определён') +
+            (chat.username ? ' (@' + chat.username + ')' : ''),
+        }),
+      ]),
+      el('p', {
+        class: 'muted',
+        text: [
+          'отметка: ' + extAgo(c.at),
+          c.collector ? 'клиент: ' + c.collector : null,
+          c.clientId ? 'id: ' + String(c.clientId).slice(0, 8) : null,
+          room ? room : null,
+          chat.whitelisted === false ? 'чат НЕ в белом списке' : null,
+          c.paused ? 'ПАУЗА' : null,
+          c.intervalSec ? 'опрос ' + c.intervalSec + ' с' : null,
+        ].filter(Boolean).join(' · '),
+      }),
+      el('p', {
+        class: 'muted mono',
+        text: 'найдено ' + (counters.found || 0) + ' · отправлено ' + (counters.sent || 0) +
+          ' · заявок ' + (counters.created || 0) + ' · дублей ' + (counters.duplicate || 0) +
+          ' · отсеяно ' + (counters.skipped || 0) + ' · прогонов ' + (counters.runs || 0) +
+          ' · ошибок разметки ' + (counters.errors || 0),
+      }),
+      c.status ? el('p', { class: 'muted', text: 'состояние: ' + c.status }) : null,
+      c.error ? el('p', { class: 'empty-note', text: '⚠ ' + c.error }) : null,
+      c.unreadable
+        ? el('p', { class: 'empty-note', text: '⚠ Разметка Telegram Web не читается: данные не отправляются. Нужна починка селекторов (extension/dom.cjs).' })
+        : null,
+    ].filter(Boolean));
+  }));
+}
+
+/** Форма белого списка для расширения: чаты и румы, интервал, пауза. */
+function extConfigForm(config) {
+  const list = el('textarea', {
+    class: 'q', rows: 5,
+    placeholder: 'Граница\nt.me/granica_es\nГраница :: Очередь BY-PL\nГраница :: 7',
+  });
+  list.value = ((config && config.whitelist) || []).join('\n');
+
+  const interval = el('input', { class: 'q', type: 'number', min: 60, max: 600, step: 10 });
+  interval.value = String((config && config.intervalSec) || 120);
+
+  const paused = el('input', { type: 'checkbox' });
+  paused.checked = Boolean(config && config.paused);
+
+  const save = el('button', {
+    class: 'btn btn-ink', type: 'button', text: 'сохранить и передать расширению',
+    onclick: async () => {
+      save.disabled = true;
+      try {
+        const whitelist = String(list.value || '').split('\n').map((x) => x.trim()).filter(Boolean);
+        const r = await adminApi('/api/admin/extension/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            whitelist,
+            intervalSec: Number(interval.value) || 120,
+            paused: paused.checked,
+          }),
+        });
+        if (!r.ok) {
+          const b = await r.json().catch(() => ({}));
+          throw new Error(b.error || 'http ' + r.status);
+        }
+        toast('Передано расширению: ' + whitelist.length + ' записей в белом списке' +
+          (paused.checked ? ', пауза включена' : '') +
+          '. Подхватит в следующий проход (или кнопка «Настройки из панели» в попапе).');
+        await renderAutoCollect();
+      } catch (e) {
+        toast('Не получилось сохранить: ' + (e.message || e));
+      } finally {
+        save.disabled = false;
+      }
+    },
+  });
+
+  return el('div', {}, [
+    el('p', {
+      class: 'muted',
+      text: 'Белый список расширения (по строке на чат). Запись с «::» ограничивает один рум (тему) ' +
+        'форум-чата — названием или id; без «::» читаются все румы чата. Пустой список — не читается ничего.',
+    }),
+    el('div', { class: 'admin-card-actions' }, [
+      list,
+      el('label', { class: 'muted', text: 'опрос, с' }),
+      interval,
+      el('label', { class: 'muted' }, [paused, el('span', { text: ' пауза' })]),
+      save,
+    ]),
+    config && config.updatedAt
+      ? el('p', { class: 'muted', text: 'Настройки заданы ' + extAgo(config.updatedAt) + '.' })
+      : el('p', { class: 'muted', text: 'Настройки из панели ещё не задавались — расширение работает по своему попапу.' }),
+  ]);
+}
+
+/** Чем стало каждое принятое сообщение: заявка, дубль или ничего + ссылка на сообщение. */
+function ingestLogKind(row) {
+  const route = row.fromCity ? row.fromCity + ' → ' + row.toCity : '';
+  const date = row.departureDate ? ', ' + fmtDate(row.departureDate) : '';
+  if (row.kind === 'created') return 'заявка создана' + (route ? ': ' + route + date : '');
+  if (row.kind === 'duplicate') return 'дубль: такая заявка уже была' + (route ? ' (' + route + ')' : '');
+  return 'обработано, заявки нет';
+}
+
+function ingestLogTable(log) {
+  const items = (log && log.items) || [];
+  return el('details', { class: 'admin-report', open: true }, [
+    el('summary', { text: 'Что принято от аккаунта: последние ' + items.length + ' сообщений' }),
+    items.length === 0
+      ? el('p', {
+          class: 'empty-note',
+          text: log && log.needsSetup
+            ? 'Нужна миграция 0006_ingest.sql (npm run deploy).'
+            : 'Пока пусто. Отсеянное на стороне расширения (болтовня, пассажирские, старые) сюда не попадает вовсе — ' +
+              'это видно в его счётчиках выше.',
+        })
+      : el('table', { class: 'admin-table' }, [
+          el('thead', {}, [el('tr', {}, [
+            'когда', 'чат', 'сообщение', 'что вышло', 'заявка',
+          ].map((t) => el('th', { text: t })))]),
+          el('tbody', {}, items.map((r) => el('tr', {}, [
+            el('td', { text: fmtWhen(r.seenAt) }),
+            el('td', { class: 'mono', text: r.chatId }),
+            el('td', {}, [r.link
+              ? el('a', {
+                  href: r.link, target: '_blank', rel: 'noopener', text: 'открыть сообщение',
+                  title: r.link.startsWith('https://t.me/c/')
+                    ? 'Служебная ссылка: открывается у участников чата'
+                    : 'Публичная ссылка на сообщение',
+                })
+              : el('span', {
+                  class: 'muted',
+                  text: 'ссылки нет',
+                  title: 'Личный чат или обычная группа: ссылки на сообщение не существует. ' +
+                    'Для приватной супергруппы ссылка появится, если расширение прочитало id чата из адреса вкладки.',
+                })]),
+            el('td', { text: ingestLogKind(r) + (r.origin ? ' · ' + (ORIGIN_LABELS[r.origin] || r.origin) : '') }),
+            el('td', { class: 'mono', text: r.listingId ? String(r.listingId).slice(0, 8) + (r.status ? ' · ' + r.status : '') : '—' }),
+          ]))),
+        ]),
+  ]);
+}

@@ -12,7 +12,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { FakeNode, bubble, bubblesList } from './helpers/fake-dom';
-import { FakeBrowser, brokenPage, minutesAgoIso } from './helpers/fake-browser';
+import { FakeBrowser, brokenPage, defaultPage, minutesAgoIso } from './helpers/fake-browser';
 
 const CHAT_KEY = 'web:drivers_pl_by';
 
@@ -56,7 +56,7 @@ describe('запуск в вкладке Telegram Web', () => {
   it('без сервера и токена ничего не отправляет и подсказывает открыть попап', async () => {
     const b = await new FakeBrowser({ settings: { serverUrl: '', token: '' } }).ready();
     await b.firstTick();
-    expect(b.fetchCalls).toHaveLength(0);
+    expect(b.ingestCalls).toHaveLength(0);
     expect(b.panelText()).toContain('Не заданы сервер или INGEST_TOKEN');
     expect(b.saved().sentKeys ?? []).toEqual([]);
   });
@@ -65,8 +65,8 @@ describe('запуск в вкладке Telegram Web', () => {
     const b = await new FakeBrowser({ settings: { whitelist: [] } }).ready();
     b.respond(okResponse());
     await b.firstTick();
-    expect(b.fetchCalls).toHaveLength(0);
-    expect(b.panelText()).toContain('не в белом списке');
+    expect(b.ingestCalls).toHaveLength(0);
+    expect(b.panelText()).toContain('Белый список пуст');
     expect(b.saved().counters?.found ?? 0).toBe(0);
   });
 });
@@ -77,8 +77,8 @@ describe('проход по чату из белого списка', () => {
     b.respond(okResponse());
     await b.firstTick();
 
-    expect(b.fetchCalls).toHaveLength(1);
-    const call = b.fetchCalls[0]!;
+    expect(b.ingestCalls).toHaveLength(1);
+    const call = b.ingestCalls[0]!;
     expect(call.url).toBe('https://pop-utka.app/api/ingest');
     expect(call.init.method).toBe('POST');
     expect(call.init.headers.Authorization).toBe('Bearer secret-token');
@@ -113,10 +113,10 @@ describe('проход по чату из белого списка', () => {
     const b = await new FakeBrowser().ready();
     b.respond(okResponse());
     await b.firstTick();
-    expect(b.fetchCalls).toHaveLength(1);
+    expect(b.ingestCalls).toHaveLength(1);
 
     await b.tick();
-    expect(b.fetchCalls).toHaveLength(1);
+    expect(b.ingestCalls).toHaveLength(1);
     expect(b.panelText()).toContain('нового нет');
     expect(b.saved().counters!.runs ?? 0).toBeLessThanOrEqual(1);
   });
@@ -127,7 +127,7 @@ describe('проход по чату из белого списка', () => {
     }).ready();
     b.respond(okResponse());
     await b.firstTick();
-    expect(b.fetchCalls).toHaveLength(0);
+    expect(b.ingestCalls).toHaveLength(0);
     expect(b.panelText()).toContain('нового нет');
   });
 
@@ -135,7 +135,7 @@ describe('проход по чату из белого списка', () => {
     const b = await new FakeBrowser({ settings: { whitelist: ['Совершенно другой чат'] } }).ready();
     b.respond(okResponse());
     await b.firstTick();
-    expect(b.fetchCalls).toHaveLength(0);
+    expect(b.ingestCalls).toHaveLength(0);
     expect(b.panelText()).toContain('не в белом списке');
     expect(b.saved().counters?.found ?? 0).toBe(0);
   });
@@ -157,7 +157,7 @@ describe('проход по чату из белого списка', () => {
     b.respond({ status: 200, body: { ok: true, summary: { received: 1, created: 1 }, results: [] } });
     await b.firstTick();
 
-    expect(b.fetchCalls).toHaveLength(1);
+    expect(b.ingestCalls).toHaveLength(1);
     const [message] = b.lastPayload().messages;
     expect(message.chatId).toBe('ext:-1001234567890');
     expect(message).not.toHaveProperty('chatUrl');
@@ -172,8 +172,8 @@ describe('проход по чату из белого списка', () => {
     b.respond({ status: 200, body: { ok: true, summary: { received: 20, created: 20 }, results: [] } });
     await b.firstTick();
 
-    expect(b.fetchCalls).toHaveLength(3);
-    expect(b.fetchCalls.map((c) => JSON.parse(c.init.body).messages.length)).toEqual([20, 20, 5]);
+    expect(b.ingestCalls).toHaveLength(3);
+    expect(b.ingestCalls.map((c) => JSON.parse(c.init.body).messages.length)).toEqual([20, 20, 5]);
   });
 
   it('maxPerChat ограничивает чтение ленты (не выкачиваем весь чат)', async () => {
@@ -184,7 +184,7 @@ describe('проход по чату из белого списка', () => {
     b.respond({ status: 200, body: { ok: true, summary: { received: 5, created: 5 }, results: [] } });
     await b.firstTick();
 
-    expect(b.fetchCalls).toHaveLength(1);
+    expect(b.ingestCalls).toHaveLength(1);
     expect(b.lastPayload().messages).toHaveLength(5);
     expect(b.saved().counters).toMatchObject({ found: 5 });
   });
@@ -196,13 +196,13 @@ describe('режим подтверждения и пауза', () => {
     b.respond(okResponse());
     await b.firstTick();
 
-    expect(b.fetchCalls).toHaveLength(0);
+    expect(b.ingestCalls).toHaveLength(0);
     expect(b.panelText()).toContain('найдено 2 — подтвердите отправку');
     expect(b.panelText()).toContain('Ждут подтверждения: 2');
     expect(b.panelText()).toContain('возьму посылку до 20 кг');
 
     await b.click(/Отправить найденные/);
-    expect(b.fetchCalls).toHaveLength(1);
+    expect(b.ingestCalls).toHaveLength(1);
     expect(b.lastPayload().messages.map((m: any) => m.messageId)).toEqual([528, 531]);
     expect(b.saved().sentKeys).toHaveLength(2);
     // отправленное уходит из очереди подтверждения
@@ -218,13 +218,13 @@ describe('режим подтверждения и пауза', () => {
     expect(b.panelText()).toContain('⏸ пауза');
 
     await b.firstTick();
-    expect(b.fetchCalls).toHaveLength(0);
+    expect(b.ingestCalls).toHaveLength(0);
     expect(b.panelText()).toContain('пауза');
 
     await b.click('Продолжить');
     expect(b.saved().settings!.paused).toBe(false);
     await b.tick();
-    expect(b.fetchCalls).toHaveLength(1);
+    expect(b.ingestCalls).toHaveLength(1);
   });
 
   it('кнопка «Диагностика» показывает, что именно видит клиент', async () => {
@@ -250,7 +250,7 @@ describe('ошибки сервера и сети (ТЗ п. 4.5)', () => {
 
     b.respond(okResponse());
     await b.tick();
-    expect(b.fetchCalls).toHaveLength(1); // повторных запросов нет
+    expect(b.ingestCalls).toHaveLength(1); // повторных запросов нет
     expect(b.saved().sentKeys ?? []).toEqual([]);
   });
 
@@ -260,7 +260,7 @@ describe('ошибки сервера и сети (ТЗ п. 4.5)', () => {
     await b.firstTick();
     expect(b.panelText()).toContain('Приём выключен на сервере (503)');
     await b.tick();
-    expect(b.fetchCalls).toHaveLength(1);
+    expect(b.ingestCalls).toHaveLength(1);
   });
 
   it('429 с Retry-After — ждём указанное время, ничего не теряя', async () => {
@@ -272,7 +272,7 @@ describe('ошибки сервера и сети (ТЗ п. 4.5)', () => {
 
     b.respond(okResponse());
     await b.tick(); // ещё идёт окно лимита
-    expect(b.fetchCalls).toHaveLength(1);
+    expect(b.ingestCalls).toHaveLength(1);
     expect(b.saved().sentKeys ?? []).toEqual([]); // сообщения не помечены отправленными
   });
 
@@ -282,7 +282,7 @@ describe('ошибки сервера и сети (ТЗ п. 4.5)', () => {
     await b.firstTick();
     expect(b.panelText()).toContain('Сервер ответил 502');
     await b.tick();
-    expect(b.fetchCalls).toHaveLength(1);
+    expect(b.ingestCalls).toHaveLength(1);
   });
 
   it('413/400 — стоп с текстом ошибки сервера (надо чинить контракт)', async () => {
@@ -292,7 +292,7 @@ describe('ошибки сервера и сети (ТЗ п. 4.5)', () => {
     expect(b.panelText()).toContain('Сервер отклонил запрос (413)');
     expect(b.panelText()).toContain('max 100 per request');
     await b.tick();
-    expect(b.fetchCalls).toHaveLength(1);
+    expect(b.ingestCalls).toHaveLength(1);
   });
 
   it('нет связи — backoff и понятное сообщение', async () => {
@@ -326,12 +326,129 @@ describe('изменившаяся разметка Telegram Web', () => {
     b.respond(okResponse());
     await b.firstTick();
 
-    expect(b.fetchCalls).toHaveLength(0);
+    expect(b.ingestCalls).toHaveLength(0);
     expect(b.panelText()).toContain('Не могу прочитать сообщения');
     expect(b.panelText()).toContain('⚠ разметка');
     expect(b.saved().counters).toMatchObject({ errors: 1 });
 
     await b.click('Диагностика');
     expect(b.panelText()).toContain('НЕ МОГУ ПРОЧИТАТЬ СООБЩЕНИЯ');
+  });
+});
+
+describe('панель как пульт: отметка «аккаунт подключён» и настройки оттуда', () => {
+  it('после прохода панель получает отметку: clientId, чат, счётчики', async () => {
+    const b = await new FakeBrowser().ready();
+    b.respond(okResponse());
+    await b.firstTick();
+
+    expect(b.heartbeatCalls.length).toBeGreaterThan(0);
+    const hb = b.lastHeartbeat();
+    expect(hb.collector).toMatch(/^tg-web-ext\//);
+    expect(hb.clientId).toBeTruthy();
+    expect(hb.chat.chatKey).toBe('web:drivers_pl_by');
+    expect(hb.chat.whitelisted).toBe(true);
+    expect(hb.counters.found).toBe(4);
+    expect(hb.url).toContain('web.telegram.org');
+    // clientId один и тот же между проходами — панель видит устойчивый аккаунт
+    expect(b.saved().clientId).toBe(hb.clientId);
+  });
+
+  it('белый список из панели заменяет локальный: чат начинает читаться', async () => {
+    const b = await new FakeBrowser({ settings: { whitelist: [] } }).ready();
+    b.setRoute('/api/extension/config', { body: { ok: true, config: { whitelist: ['t.me/drivers_pl_by'] } } });
+    b.respond(okResponse());
+    await b.firstTick();
+
+    expect(b.configCalls.length).toBeGreaterThan(0);
+    expect(b.ingestCalls).toHaveLength(1);
+    expect(b.saved().settings?.whitelist).toEqual(['t.me/drivers_pl_by']);
+  });
+
+  it('пауза из панели останавливает чтение сообщений', async () => {
+    const b = await new FakeBrowser().ready();
+    b.setRoute('/api/extension/config', { body: { ok: true, config: { paused: true } } });
+    b.respond(okResponse());
+    await b.firstTick();
+
+    expect(b.ingestCalls).toHaveLength(0);
+    expect(b.panelText()).toContain('пауза');
+  });
+
+  it('настройки приходят и в ответе на отметку — подхватываются со следующего прохода', async () => {
+    // старый сервер без GET /api/extension/config: панель передаёт список вместе с отметкой
+    const b = await new FakeBrowser({ settings: { whitelist: [] } }).ready();
+    b.setRoute('/api/extension/config', { status: 404, body: { error: 'not found' } });
+    b.setRoute('/api/extension/heartbeat', {
+      body: { ok: true, clientId: 'x', config: { whitelist: ['t.me/drivers_pl_by'], intervalSec: 180 } },
+    });
+    b.respond(okResponse());
+
+    await b.firstTick();
+    expect(b.ingestCalls).toHaveLength(0); // в этом проходе список был ещё пуст
+    expect(b.saved().settings?.whitelist).toEqual(['t.me/drivers_pl_by']);
+    expect(b.saved().settings?.intervalSec).toBe(180);
+
+    await b.tick();                        // следующий проход — уже читает
+    expect(b.ingestCalls).toHaveLength(1);
+  });
+
+  it('сервер без ручек панели (404) — работаем на локальных настройках', async () => {
+    const b = await new FakeBrowser().ready();
+    b.setRoute('/api/extension/config', { status: 404, body: { error: 'not found' } });
+    b.respond(okResponse());
+    await b.firstTick();
+
+    expect(b.ingestCalls).toHaveLength(1);
+    expect(b.lastPayload().messages.length).toBe(2);
+  });
+});
+
+describe('румы (топики) форум-супергруппы: считать только выбранные', () => {
+  const url = 'https://web.telegram.org/a/#/im?p=g1234567890&topic=7';
+
+  it('запись «чат :: id рума» совпала — читаем, ключ приватной супергруппы', async () => {
+    const b = await new FakeBrowser({ url, settings: { whitelist: ['Водители Польша–Беларусь :: 7'] } }).ready();
+    b.respond(okResponse());
+    await b.firstTick();
+
+    expect(b.ingestCalls).toHaveLength(1);
+    const hb = b.lastHeartbeat();
+    expect(hb.chat.chatKey).toBe('ext:-1001234567890');
+    expect(hb.chat.topicId).toBe(7);
+    expect(hb.chat.whitelisted).toBe(true);
+  });
+
+  it('открыт другой рум — не читаем, и панель объясняет почему', async () => {
+    const b = await new FakeBrowser({ url, settings: { whitelist: ['Водители Польша–Беларусь :: 99'] } }).ready();
+    b.respond(okResponse());
+    await b.firstTick();
+
+    expect(b.ingestCalls).toHaveLength(0);
+    expect(b.panelText()).toContain('рум не совпал');
+    expect(b.saved().counters?.found ?? 0).toBe(0);
+  });
+
+  it('запись без «:: тема» берёт весь чат, все румы', async () => {
+    const b = await new FakeBrowser({ url, settings: { whitelist: ['Водители Польша–Беларусь'] } }).ready();
+    b.respond(okResponse());
+    await b.firstTick();
+
+    expect(b.ingestCalls).toHaveLength(1);
+  });
+
+  it('рум, заданный названием, совпадает без учёта регистра и тире', async () => {
+    const page = defaultPage();
+    const b = await new FakeBrowser({
+      url: 'https://web.telegram.org/a/#/im?p=g1234567890',
+      page: page.append(new FakeNode('div', { className: 'chat-info' })
+        .append(new FakeNode('div', { className: 'topic-title', text: 'Очередь BY–PL' }))),
+      settings: { whitelist: ['Водители Польша–Беларусь :: очередь by-pl'] },
+    }).ready();
+    b.respond(okResponse());
+    await b.firstTick();
+
+    expect(b.lastHeartbeat().chat.topicTitle).toBe('Очередь BY–PL');
+    expect(b.ingestCalls).toHaveLength(1);
   });
 });

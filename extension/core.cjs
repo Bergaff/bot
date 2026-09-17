@@ -119,8 +119,45 @@
   /* ---------------------------------------------------------------- */
 
   /** Запись белого списка: ссылка t.me/<username>, @username или название чата. */
+  /**
+   * Канонический peer-id чата из того, что отдаёт Telegram Web.
+   *
+   * Клиент показывает чат по-разному: /k/#-1001234567890, /a/#/im?p=g1234567890,
+   * ?p=u123456 (личный), ?p=c123456 (обычная группа). Приводим к одному виду —
+   * тогда из приватной супергруппы можно построить служебную ссылку
+   * https://t.me/c/<id>/<msgId>, которая открывается у участников чата
+   * (именно её просит модератор: «дать ссылку на сообщение, чтобы переслать»).
+   */
+  function normalizePeerId(raw) {
+    const s = String(raw == null ? '' : raw).trim();
+    if (!s) return null;
+    let m = /^[gG](\d{4,})$/.exec(s);                 // супергруппа/канал: g1234567890
+    if (m) return { id: '-100' + m[1], kind: 'supergroup' };
+    m = /^[cC](\d{4,})$/.exec(s);                     // обычная группа: c1234567890
+    if (m) return { id: '-' + m[1], kind: 'group' };
+    m = /^[uU](\d{4,})$/.exec(s);                     // личный чат: u1234567890
+    if (m) return { id: m[1], kind: 'user' };
+    if (/^-100\d{4,}$/.test(s)) return { id: s, kind: 'supergroup' };
+    if (/^-\d{4,}$/.test(s)) return { id: s, kind: 'group' };
+    if (/^\d{4,}$/.test(s)) return { id: s, kind: 'user' };
+    return null;
+  }
+
   function normalizeWhitelistEntry(raw) {
     const value = String(raw || '').trim();
+    if (!value) return null;
+    // «чат :: тема» — считать только один рум (топик) форум-супергруппы.
+    // Тема задаётся названием («Граница :: Очередь BY-PL») или id («Граница :: 12»).
+    const parts = value.split(/\s*(?:::|>>)\s*/);
+    const base = normalizeChatPart((parts[0] || '').trim());
+    if (!base) return null;
+    const topicPart = (parts[1] || '').trim();
+    if (!topicPart) return base;
+    if (/^\d{1,12}$/.test(topicPart)) return Object.assign(base, { topicId: Number(topicPart), topic: null });
+    return Object.assign(base, { topic: squashTitle(topicPart), topicId: null });
+  }
+
+  function normalizeChatPart(value) {
     if (!value) return null;
     const link = /t\.me\/(?:s\/)?@?([A-Za-z][A-Za-z0-9_]{3,31})/i.exec(value);
     if (link) return { kind: 'username', value: link[1].toLowerCase() };
@@ -130,7 +167,11 @@
   }
 
   function normalizeWhitelist(list) {
-    return (list || []).map(normalizeWhitelistEntry).filter(Boolean);
+    // терпим к строке (настройки из панели могут прийти текстом): режем по строкам/запятым
+    const arr = typeof list === 'string'
+      ? list.split(/[\n,;]+/)
+      : (Array.isArray(list) ? list : []);
+    return arr.map(normalizeWhitelistEntry).filter(Boolean);
   }
 
   /**
@@ -153,18 +194,73 @@
   function matchesWhitelist(chat, whitelist) {
     const entries = normalizeWhitelist(whitelist);
     if (entries.length === 0) return false;
-    const title = squashTitle(chat && chat.title);
+    const titles = chatTitleCandidates(chat);
     const username = String((chat && chat.username) || '').toLowerCase();
+    const topics = topicCandidates(chat);
+    const topicId = chat && chat.topicId != null && chat.topicId !== '' ? Number(chat.topicId) : null;
+
     for (const e of entries) {
-      if (e.kind === 'username') {
-        if (username && username === e.value) return true;
-        // в названии чата иногда пишут юзернейм — считаем совпадением
-        if (title && title.includes(e.value)) return true;
-      } else if (title && (title === e.value || title.includes(e.value) || e.value.includes(title))) {
-        return true;
-      }
+      if (!chatPartMatches(e, titles, username)) continue;
+      // запись без «:: тема» — берём весь чат, все румы
+      if (e.topic == null && e.topicId == null) return true;
+      if (e.topicId != null && topicId === e.topicId) return true;
+      if (e.topic && topics.some((t) => t === e.topic || t.includes(e.topic) || e.topic.includes(t))) return true;
+      // чат совпал, но рум задан и не совпал/не прочитался — не читаем (ТЗ: только белый список)
     }
     return false;
+  }
+
+  /** Названия, по которым узнаём чат: заголовок шапки и, если прочиталось, имя группы. */
+  function chatTitleCandidates(chat) {
+    const out = [];
+    const t = squashTitle(chat && chat.title);
+    const g = squashTitle(chat && chat.groupTitle);
+    if (t) out.push(t);
+    if (g && g !== t) out.push(g);
+    return out;
+  }
+
+  /** Названия, по которым узнаём рум (топик): явный заголовок темы или шапка при найденной группе. */
+  function topicCandidates(chat) {
+    const out = [];
+    const tt = squashTitle(chat && chat.topicTitle);
+    if (tt) out.push(tt);
+    const t = squashTitle(chat && chat.title);
+    const g = squashTitle(chat && chat.groupTitle);
+    if (g && t && t !== g) out.push(t);
+    return out;
+  }
+
+  function chatPartMatches(entry, titles, username) {
+    if (entry.kind === 'username') {
+      return Boolean(username && username === entry.value) ||
+        // в названии чата иногда пишут юзернейм — считаем совпадением
+        titles.some((t) => t.includes(entry.value));
+    }
+    return titles.some((t) => t === entry.value || t.includes(entry.value) || entry.value.includes(t));
+  }
+
+  /**
+   * Почему чат не подошёл белому списку — для диагностики (на логику не влияет).
+   * Отличает «чат не в списке» от «чат тот, но рум не совпал или не прочитался».
+   */
+  function whitelistMismatch(chat, whitelist) {
+    const entries = normalizeWhitelist(whitelist);
+    if (entries.length === 0) return 'Белый список пуст — сообщения не читаются вовсе.';
+    if (matchesWhitelist(chat, whitelist)) return null;
+    const titles = chatTitleCandidates(chat);
+    const username = String((chat && chat.username) || '').toLowerCase();
+    const sameChat = entries.filter((e) => chatPartMatches(e, titles, username));
+    if (sameChat.length === 0) return 'Чат не в белом списке.';
+    const topics = topicCandidates(chat);
+    const hasTopicId = Boolean(chat && chat.topicId != null && chat.topicId !== '');
+    if (topics.length === 0 && !hasTopicId) {
+      return 'Чат в белом списке с указанием рума, но тема (рум) в DOM не прочиталась — сообщения не читаются. ' +
+        'Уберите «:: тема» из записи, если нужны все румы этого чата.';
+    }
+    return 'Чат в белом списке, но рум не совпал: открыт «' +
+      (topics[0] || ('id ' + chat.topicId)) + '», а в списке «' +
+      sameChat.map((e) => (e.topic || (e.topicId != null ? 'id ' + e.topicId : 'все румы'))).join(', ') + '».';
   }
 
   /* ---------------------------------------------------------------- */
@@ -180,6 +276,8 @@
   function chatKeyOf(chat) {
     if (!chat) return null;
     if (chat.username) return 'web:' + String(chat.username).replace(/^@/, '');
+    const peer = normalizePeerId(chat && chat.id);
+    if (peer) return 'ext:' + peer.id;
     if (chat.id !== undefined && chat.id !== null && chat.id !== '') return 'ext:' + chat.id;
     if (chat.title) return 'ext:' + stableId('title:' + squashTitle(chat.title));
     return null;
@@ -388,6 +486,40 @@
     return out;
   }
 
+  /**
+   * Объяснить ошибку «вкладка не отвечает» так, чтобы было понятно, что делать.
+   * alive — последняя отметка контент-скрипта из storage (heartbeat), её может не быть.
+   */
+  function explainTabError(errText, alive, now) {
+    const text = String(errText || '');
+    const at = now || Date.now();
+    const ageMin = alive && alive.at ? Math.round((at - Number(alive.at)) / 60000) : null;
+    const ageText = ageMin == null ? null : (ageMin <= 0 ? 'только что' : ageMin + ' мин назад');
+
+    if (/Extension context invalidated/i.test(text)) {
+      return 'Расширение обновлено или переустановлено, а вкладка держит старую копию. Обновите web.telegram.org (F5). ' +
+        'Если не поможет — удалите расширение и загрузите папку extension/ заново: после повторного скачивания ZIP ' +
+        'папка часто переезжает, и Chrome продолжает смотреть в старое место.';
+    }
+    if (/Receiving end does not exist|message port closed|Could not establish connection/i.test(text)) {
+      if (alive && alive.ok === false && alive.error) {
+        return 'Контент-скрипт загрузился, но упал при инициализации: ' + alive.error +
+          '. Обновите вкладку; если повторится — пришлите этот текст.';
+      }
+      if (alive && ageText) {
+        return 'Расширение отвечало в этой вкладке ' + ageText + ', но сейчас не отвечает. ' +
+          'Обновите web.telegram.org (F5) и нажмите ещё раз.';
+      }
+      return 'Контент-скрипт не подключён к этой вкладке: она открыта раньше установки расширения ' +
+        '(или это другой профиль браузера). Обновите web.telegram.org (F5) — расширение подключается при загрузке страницы.';
+    }
+    if (/Cannot access|Permission|not allowed|May not be permitted/i.test(text)) {
+      return 'Браузер не даёт расширению доступ к вкладке: ' + text +
+        '. Убедитесь, что адрес вкладки начинается с https://web.telegram.org/';
+    }
+    return text ? 'Вкладка не ответила: ' + text : 'Вкладка не ответила.';
+  }
+
   /** Слить счётчики проходов. */
   function mergeCounters(a, b) {
     const base = a || {};
@@ -419,7 +551,13 @@
     lines.push('Чат: ' + (r.chat && r.chat.title ? r.chat.title : 'не определён') +
       (r.chat && r.chat.username ? ' (@' + r.chat.username + ')' : '') +
       ' → chatId ' + (r.chatKey || '—'));
-    lines.push('В белом списке: ' + (r.whitelisted ? 'да' : 'нет'));
+    if (r.chat && (r.chat.topicTitle || r.chat.topicId != null)) {
+      lines.push('Рум (тема): ' + (r.chat.topicTitle || '—') +
+        (r.chat.topicId != null ? ' (id ' + r.chat.topicId + ')' : ''));
+    }
+    if (r.chat && r.chat.groupTitle) lines.push('Группа: ' + r.chat.groupTitle);
+    lines.push('В белом списке: ' + (r.whitelisted ? 'да' : 'нет') +
+      (r.whitelistNote ? ' — ' + r.whitelistNote : ''));
     lines.push('Сообщений прочитано: ' + (r.total || 0) + ' (стратегия: ' + (r.strategy || '—') + ')');
     lines.push('К отправке: ' + (r.toSend || 0) + ', уже отправлено: ' + (r.alreadySent || 0) +
       ', отсеяно детектом: ' + (r.filtered || 0));
@@ -440,6 +578,11 @@
     withDefaults,
     clamp,
     serverUrlProblem,
+    explainTabError,
+    normalizePeerId,
+    whitelistMismatch,
+    chatTitleCandidates,
+    topicCandidates,
     normalizeWhitelist,
     normalizeWhitelistEntry,
     matchesWhitelist,

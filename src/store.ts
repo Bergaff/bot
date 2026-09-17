@@ -1,4 +1,5 @@
 import type { Env, ListFilters, Listing, ListingInput, ListingOrigin, ListingStatus } from './types.ts';
+import { listingSourceLink } from './links.ts';
 import type { DedupeSubject, DuplicateHit, DuplicateKind } from './dedupe.ts';
 import { pickDuplicate } from './dedupe.ts';
 import { normalizeContacts } from './util.ts';
@@ -727,4 +728,240 @@ export async function createListingSafe(
     kind: hit ? hit.kind : null,
     why: hit ? hit.why : '',
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Расширение как «подключённый аккаунт»                                */
+/*                                                                     */
+/* Авторизация Telegram остаётся в браузере (расширение читает DOM      */
+/* открытой вкладки), а панель сервера становится пультом: задаёт       */
+/* белый список чатов и румов, видит статус, счётчики и ошибки.         */
+/* Храним в KV (в parcel он уже есть), миграция не нужна.               */
+/* ------------------------------------------------------------------ */
+
+const EXT_CONFIG_KEY = 'ext:config';
+const EXT_CLIENTS_KEY = 'ext:clients';
+/** Сколько аккаунтов (браузеров) помним и как давно не выходившие на связь выбрасываем. */
+const EXT_CLIENTS_MAX = 20;
+const EXT_CLIENT_STALE_MS = 14 * 24 * 3600 * 1000;
+
+/** Чат и рум (топик), которые расширение видело последними. */
+export interface ExtensionChatRef {
+  chatKey?: string | null;
+  title?: string | null;
+  username?: string | null;
+  kind?: string | null;
+  groupTitle?: string | null;
+  topicTitle?: string | null;
+  topicId?: number | null;
+  whitelisted?: boolean;
+  at?: string | null;
+}
+
+/** Один подключённый браузер с расширением. */
+export interface ExtensionClient {
+  clientId: string;
+  collector?: string | null;
+  at: string;
+  url?: string | null;
+  chat?: ExtensionChatRef | null;
+  counters?: Record<string, number> | null;
+  status?: string | null;
+  error?: string | null;
+  pending?: number;
+  unreadable?: boolean;
+  whitelist?: string[];
+  intervalSec?: number;
+  paused?: boolean;
+}
+
+/** Настройки, которые панель отдаёт расширению. */
+export interface ExtensionConfig {
+  /** Чаты и румы: 'Граница', 't.me/granica_es', 'Граница :: Очередь BY-PL', 'Граница :: 7'. */
+  whitelist: string[];
+  intervalSec: number | null;
+  paused: boolean | null;
+  updatedAt: string;
+}
+
+async function kvGetJson<T>(env: Env, key: string): Promise<T | null> {
+  try {
+    const raw = await env.KV.get(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function strOrNull(v: unknown, max = 200): string | null {
+  if (typeof v !== 'string') return null;
+  const s = v.trim().slice(0, max);
+  return s || null;
+}
+
+/**
+ * Привести то, что прислала панель, к безопасному виду.
+ * Белый список обязателен (иначе null — панель получит 400).
+ */
+export function normalizeExtensionConfig(raw: unknown): ExtensionConfig | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const src = raw as Record<string, unknown>;
+  const rawList = Array.isArray(src.whitelist)
+    ? src.whitelist
+    : (typeof src.whitelist === 'string' ? src.whitelist.split(/[\n,;]+/) : null);
+  if (!rawList) return null;
+  const whitelist = rawList
+    .map((x) => String(x ?? '').trim().slice(0, 200))
+    .filter(Boolean)
+    .slice(0, 50);
+  const rawInterval = src.intervalSec == null ? null : Number(src.intervalSec);
+  const intervalSec = rawInterval != null && Number.isFinite(rawInterval)
+    ? Math.min(600, Math.max(60, Math.round(rawInterval)))
+    : null;
+  return {
+    whitelist,
+    intervalSec,
+    paused: typeof src.paused === 'boolean' ? src.paused : null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export async function getExtensionConfig(env: Env): Promise<ExtensionConfig | null> {
+  return kvGetJson<ExtensionConfig>(env, EXT_CONFIG_KEY);
+}
+
+export async function putExtensionConfig(env: Env, raw: unknown): Promise<ExtensionConfig | null> {
+  const cfg = normalizeExtensionConfig(raw);
+  if (!cfg) return null;
+  await env.KV.put(EXT_CONFIG_KEY, JSON.stringify(cfg));
+  return cfg;
+}
+
+/** Записать отметку расширения («аккаунт подключён, вижу такой-то чат»). */
+export async function recordExtensionClient(env: Env, raw: unknown): Promise<ExtensionClient | null> {
+  if (!raw || typeof raw !== 'object') return null;
+  const src = raw as Record<string, unknown>;
+  const clientId = strOrNull(src.clientId, 64);
+  if (!clientId) return null;
+
+  const chat = (src.chat && typeof src.chat === 'object' ? src.chat : null) as Record<string, unknown> | null;
+  const counters = (src.counters && typeof src.counters === 'object' ? src.counters : null) as Record<string, number> | null;
+  const client: ExtensionClient = {
+    clientId,
+    collector: strOrNull(src.collector, 64),
+    at: strOrNull(src.at, 40) ?? new Date().toISOString(),
+    url: strOrNull(src.url, 300),
+    chat: chat
+      ? {
+          chatKey: strOrNull(chat.chatId ?? chat.chatKey, 64),
+          title: strOrNull(chat.title, 120),
+          username: strOrNull(chat.username, 64),
+          kind: strOrNull(chat.kind, 20),
+          groupTitle: strOrNull(chat.groupTitle, 120),
+          topicTitle: strOrNull(chat.topicTitle, 120),
+          topicId: chat.topicId == null ? null : Number(chat.topicId),
+          whitelisted: Boolean(chat.whitelisted),
+          at: strOrNull(chat.at, 40),
+        }
+      : null,
+    counters,
+    status: strOrNull(src.status, 300),
+    error: strOrNull(src.error, 500),
+    pending: Number.isFinite(Number(src.pending)) ? Number(src.pending) : 0,
+    unreadable: Boolean(src.unreadable),
+    whitelist: Array.isArray(src.whitelist) ? src.whitelist.map((x) => String(x).slice(0, 200)).slice(0, 50) : [],
+    intervalSec: Number.isFinite(Number(src.intervalSec)) ? Number(src.intervalSec) : undefined,
+    paused: typeof src.paused === 'boolean' ? src.paused : undefined,
+  };
+
+  const map = (await kvGetJson<Record<string, ExtensionClient>>(env, EXT_CLIENTS_KEY)) ?? {};
+  map[clientId] = client;
+  const now = Date.now();
+  const fresh = Object.values(map)
+    .filter((c) => {
+      const t = Date.parse(c?.at ?? '');
+      return !Number.isFinite(t) || now - t < EXT_CLIENT_STALE_MS;
+    })
+    .sort((a, b) => Date.parse(b.at ?? '') - Date.parse(a.at ?? ''))
+    .slice(0, EXT_CLIENTS_MAX);
+  const out: Record<string, ExtensionClient> = {};
+  for (const c of fresh) out[c.clientId] = c;
+  await env.KV.put(EXT_CLIENTS_KEY, JSON.stringify(out), { expirationTtl: 30 * 24 * 3600 });
+  return client;
+}
+
+export async function listExtensionClients(env: Env): Promise<ExtensionClient[]> {
+  const map = (await kvGetJson<Record<string, ExtensionClient>>(env, EXT_CLIENTS_KEY)) ?? {};
+  return Object.values(map).sort((a, b) => Date.parse(b.at ?? '') - Date.parse(a.at ?? ''));
+}
+
+/* ------------------------------------------------------------------ */
+/* Журнал приёма: что пришло от расширения и чем стало                  */
+/* ------------------------------------------------------------------ */
+
+/** Строка журнала: сообщение → заявка / дубль / отсеяно + ссылка на сообщение. */
+export interface IngestLogRow {
+  chatId: string;
+  messageId: number;
+  seenAt: string;
+  listingId: string | null;
+  status: string | null;
+  type: string | null;
+  fromCity: string | null;
+  toCity: string | null;
+  departureDate: string | null;
+  origin: ListingOrigin | null;
+  /** Ссылка на сообщение: t.me/<username>/<id> или служебная t.me/c/<id>/<id>. */
+  link: string | null;
+  /**
+   * Чем стало сообщение: 'created' — из него создана заявка,
+   * 'duplicate' — заявка уже была (это дубль, ссылка ведёт на чужую карточку),
+   * 'none' — сообщение обработано, но заявки нет (отсев или откат).
+   */
+  kind: 'created' | 'duplicate' | 'none';
+}
+
+/**
+ * Последние обработанные сообщения (tg_seen) вместе с тем, во что они превратились.
+ * Ссылка строится та же, что на сайте: для публичных чатов — открытая,
+ * для приватных супергрупп — служебная t.me/c/… (открывается у участников).
+ */
+export async function listIngestLog(env: Env, limit = 50): Promise<IngestLogRow[]> {
+  const n = Math.min(200, Math.max(1, Math.round(limit)));
+  const links = await getChatLinks(env).catch(() => ({}) as Record<string, string>);
+  const res = await env.DB.prepare(
+    `SELECT s.chat_id AS chatId, s.message_id AS messageId, s.seen_at AS seenAt, s.listing_id AS listingId,
+            l.status AS status, l.type AS type, l.from_city AS fromCity, l.to_city AS toCity,
+            l.departure_date AS departureDate, l.origin AS origin,
+            l.source_chat_id AS lChatId, l.source_message_id AS lMessageId
+       FROM tg_seen s
+       LEFT JOIN listings l ON l.id = s.listing_id
+      ORDER BY s.seen_at DESC, s.message_id DESC
+      LIMIT ?`
+  ).bind(n).all();
+
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => {
+    const chatId = String(r.chatId ?? '');
+    const messageId = Number(r.messageId ?? 0);
+    const origin = (r.origin as ListingOrigin | null) ?? null;
+    const listingId = typeof r.listingId === 'string' ? r.listingId : null;
+    // заявка «своя», если она создана ровно из этого сообщения; иначе это дубль
+    const ownListing = listingId !== null &&
+      String(r.lChatId ?? '') === chatId && Number(r.lMessageId ?? 0) === messageId;
+    const kind: IngestLogRow['kind'] = listingId === null ? 'none' : (ownListing ? 'created' : 'duplicate');
+    return {
+      chatId,
+      messageId,
+      seenAt: String(r.seenAt ?? ''),
+      listingId,
+      kind,
+      status: typeof r.status === 'string' ? r.status : null,
+      type: typeof r.type === 'string' ? r.type : null,
+      fromCity: typeof r.fromCity === 'string' ? r.fromCity : null,
+      toCity: typeof r.toCity === 'string' ? r.toCity : null,
+      departureDate: typeof r.departureDate === 'string' ? r.departureDate : null,
+      origin,
+      link: listingSourceLink(chatId, messageId, links),
+    };
+  });
 }

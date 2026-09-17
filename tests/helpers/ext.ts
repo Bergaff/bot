@@ -17,6 +17,14 @@ export interface ChatRef {
   username?: string | null;
   id?: string | number | null;
   chatId?: string | null;
+  /** Как Telegram Web представил чат: supergroup | group | user | channel. */
+  kind?: string | null;
+  /** Заголовок группы, когда открыт рум (заголовок вкладки — имя рума). */
+  groupTitle?: string | null;
+  /** Имя рума (топика) форум-чата. */
+  topicTitle?: string | null;
+  /** id рума (топика) из адреса вкладки. */
+  topicId?: number | null;
 }
 
 export interface ExtSettings {

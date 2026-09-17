@@ -45,8 +45,12 @@
     <label for="token">INGEST_TOKEN</label>
     <input id="token" type="password" placeholder="Bearer-токен для /api/ingest" autocomplete="off">
 
-    <label for="whitelist">Белый список чатов (по строке: название или t.me/…)</label>
-    <textarea id="whitelist" placeholder="Водители Польша–Беларусь&#10;t.me/drivers_pl_by"></textarea>
+    <label for="whitelist">Белый список чатов и румов (по строке: название или t.me/…)</label>
+    <textarea id="whitelist" placeholder="Водители Польша–Беларусь&#10;t.me/drivers_pl_by&#10;Граница :: Очередь BY-PL&#10;Граница :: 7"></textarea>
+    <p style="margin:3px 0 0;color:#64748b;font-size:11.5px">
+      Запись с <code>::</code> ограничивает один рум (тему) форум-чата: названием или id.
+      Без <code>::</code> — весь чат, все румы. Тот же список можно править в панели сервера.
+    </p>
 
     <div class="row">
       <div>
@@ -72,9 +76,11 @@
 
     <div class="btns">
       <button id="save" class="primary">Сохранить</button>
+      <button id="selfcheck" class="primary">Самопроверка</button>
       <button id="check">Проверить сервер</button>
       <button id="diagnose">Диагностика вкладки</button>
       <button id="send">Отправить найденные</button>
+      <button id="sync">Настройки из панели</button>
       <button id="reset">Сбросить счётчики</button>
     </div>
 
@@ -82,6 +88,12 @@
 
     <div class="stats" id="stats"></div>
     <pre id="diag" hidden></pre>
+
+    <div class="note">
+      Панель сервера видит это расширение как «подключённый аккаунт»: вкладка «чаты» →
+      блок «Аккаунт Telegram (расширение)» — статус, текущий чат и рум, счётчики,
+      белый список и пауза. Белый список, заданный в панели, имеет приоритет над локальным.
+    </div>
 
     <div class="note">
       Токен хранится только в <code>chrome.storage.local</code> этого браузера и в репозиторий не попадает.

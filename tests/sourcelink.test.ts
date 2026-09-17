@@ -15,9 +15,16 @@ describe('listingSourceLink', () => {
     expect(listingSourceLink('web:durov', undefined)).toBe('https://t.me/durov');
   });
 
-  it('приватный чат из расширения: ext:* → null (ссылки нет)', () => {
-    expect(listingSourceLink('ext:-100123', 5)).toBeNull();
-    expect(listingSourceLink('ext:-1001234567890', null)).toBeNull();
+  it('приватная супергруппа из расширения: ext:-100<id> → служебная t.me/c/<id>/<msg>', () => {
+    // открывается у участников чата — именно её просит модератор: открыть и переслать самому
+    expect(listingSourceLink('ext:-1001234567890', 528)).toBe('https://t.me/c/1234567890/528');
+    expect(listingSourceLink('ext:-1001234567890', null)).toBe('https://t.me/c/1234567890');
+  });
+
+  it('обычная группа, личный чат и синтетический ключ из расширения: ссылки на сообщение нет', () => {
+    expect(listingSourceLink('ext:-5551234', 12)).toBeNull();   // базовая группа
+    expect(listingSourceLink('ext:987654321', 12)).toBeNull();  // личный чат (peer user)
+    expect(listingSourceLink('ext:abc123', 12)).toBeNull();     // ключ по заголовку, id неизвестен
   });
 
   it('ext:* с вручную заданной ссылкой в chat_links → ссылка есть', () => {
@@ -106,8 +113,15 @@ describe('formatListing: источник и признак origin не лома
     expect(card.match(/\+48579264254/g)).toHaveLength(1);
   });
 
-  it('карточка из приватного чата расширения: ссылки нет, источник остаётся', () => {
+  it('карточка из приватной супергруппы расширения: служебная ссылка и источник на месте', () => {
+    // t.me/c/… открывается у участников чата — модератор может открыть и переслать сам
     const card = formatListing(listing({ sourceChatId: 'ext:-100123', origin: 'extension' }));
+    expect(card).toContain('<a href="https://t.me/c/123/9001">исходное сообщение</a>');
+    expect(card).toContain('чат «Водители Польша–Беларусь»');
+  });
+
+  it('карточка из чата расширения без peer-id: ссылки нет, источник остаётся', () => {
+    const card = formatListing(listing({ sourceChatId: 'ext:abc123', origin: 'extension' }));
     expect(card).not.toContain('исходное сообщение');
     expect(card).toContain('чат «Водители Польша–Беларусь»');
   });

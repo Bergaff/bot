@@ -112,10 +112,16 @@ export function createAdminUi(opts: {
   sourceChats?: any[];
   confirmAnswer?: boolean;
   collectReport?: any;
+  /** Ответ GET /api/admin/extension: подключённые расширения и настройки для них. */
+  extension?: any;
+  /** Ответ GET /api/admin/ingest/log: журнал принятого от расширений. */
+  ingestLog?: any;
   fail?: (path: string, method: string) => number | null;
 } = {}): AdminUi {
   const requests: UiRequest[] = [];
   const toasts: string[] = [];
+  // настройки расширения, «как в KV»: PUT перезаписывает, GET отдаёт сохранённое
+  let extConfig: any = null;
   const store = new Map<string, string>();
   // список чатов обхода живой: POST добавляет, DELETE убирает — как в настоящей БД.
   // Без этого нельзя проверить, что таблица обновляется БЕЗ перезагрузки страницы.
@@ -200,6 +206,19 @@ export function createAdminUi(opts: {
       }
       if (method === 'GET' && path === '/api/admin/collect/status') {
         return opts.status === null ? respond(500, { error: 'boom' }) : respond(200, opts.status ?? STATUS);
+      }
+      if (method === 'GET' && path === '/api/admin/extension') {
+        const fallback = { clients: [], config: extConfig, ingestEnabled: true };
+        return respond(200, opts.extension ?? fallback);
+      }
+      if (method === 'PUT' && path === '/api/admin/extension/config') {
+        if (!body || body.whitelist == null) return respond(400, { error: 'whitelist: нужен массив строк' });
+        const list = Array.isArray(body.whitelist) ? body.whitelist : String(body.whitelist).split('\n');
+        extConfig = { whitelist: list, intervalSec: body.intervalSec ?? null, paused: body.paused ?? null, updatedAt: '2026-09-17T10:00:00.000Z' };
+        return respond(200, { ok: true, config: extConfig });
+      }
+      if (method === 'GET' && path.startsWith('/api/admin/ingest/log')) {
+        return respond(200, opts.ingestLog ?? { items: [] });
       }
       if (method === 'GET' && path === '/api/admin/source-chats') {
         return respond(200, { chats: opts.sourceChats ?? [] });
@@ -589,7 +608,11 @@ describe('крайние состояния блока', () => {
     const ui = createAdminUi({ status: null });
     const box = await renderBlock(ui);
     expect(queryAll(box, 'tbody tr')).toHaveLength(3);
-    expect(queryAll(box, '.admin-report')).toHaveLength(0);
+    // отчёт последнего прогона не показан; единственный details — журнал приёма расширения
+    const reports = queryAll(box, '.admin-report');
+    expect(reports).toHaveLength(1);
+    expect(reports[0]!.textContent).toContain('Что принято от аккаунта');
+    expect(box.textContent).not.toContain('Отчёт последнего прогона');
   });
 
   it('fmtWhen понимает и ISO, и формат sqlite', async () => {
@@ -599,5 +622,152 @@ describe('крайние состояния блока', () => {
     expect(ui.ctx.fmtWhen('2026-09-16 13:20:49')).toContain('2026');
     expect(ui.ctx.fmtWhen('2026-09-16T13:20:49.156Z')).toContain('2026');
     expect(ui.ctx.fmtWhen('не дата')).toBe('не дата');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Панель как пульт расширения: аккаунт Telegram, румы, журнал приёма   */
+/* ------------------------------------------------------------------ */
+
+const EXT_CLIENT = {
+  clientId: '1f7c2b40-demo-0001',
+  collector: 'tg-web-ext/0.9.0',
+  at: new Date().toISOString(),
+  url: 'https://web.telegram.org/a/#-1001234567890_7',
+  chat: {
+    chatKey: 'ext:-1001234567890', title: 'Водители Польша–Беларусь', username: null, kind: 'c',
+    groupTitle: 'Водители Польша–Беларусь', topicTitle: 'Очередь BY-PL', topicId: 7, whitelisted: true,
+  },
+  counters: { found: 12, sent: 3, created: 2, duplicate: 1, skipped: 9, runs: 5, errors: 0 },
+  status: 'рум: Очередь BY-PL — прочитано 12 сообщений',
+  error: null,
+  pending: 0,
+  unreadable: false,
+  whitelist: ['Водители Польша–Беларусь :: 7'],
+  intervalSec: 120,
+  paused: false,
+};
+
+const INGEST_LOG = [
+  {
+    seenAt: '2026-09-17 09:20:18', chatId: 'ext:-1001234567890', messageId: 528, kind: 'created',
+    link: 'https://t.me/c/1234567890/528', listingId: 'f1c9bee0-1111-2222-3333-444455556666',
+    status: 'pending', type: 'offer', fromCity: 'Минск', toCity: 'Варшава',
+    departureDate: '2026-09-18', origin: 'extension',
+  },
+  {
+    seenAt: '2026-09-17 09:19:02', chatId: 'web:drivers_pl_by', messageId: 9001, kind: 'duplicate',
+    link: 'https://t.me/drivers_pl_by/9001', listingId: 'efb6fbe0-aaaa-bbbb-cccc-ddddeeeeffff',
+    status: 'pending', type: 'offer', fromCity: 'Минск', toCity: 'Варшава',
+    departureDate: '2026-09-18', origin: 'extension',
+  },
+];
+
+describe('панель как пульт расширения', () => {
+  it('аккаунт на связи: чат, рум, счётчики и состояние видны модератору', async () => {
+    const ui = createAdminUi({ extension: { clients: [EXT_CLIENT], config: null, ingestEnabled: true } });
+    const box = await renderBlock(ui);
+    expect(box.textContent).toContain('Аккаунт Telegram (расширение)');
+    expect(box.textContent).toContain('на связи');
+    expect(box.textContent).toContain('Водители Польша–Беларусь');
+    expect(box.textContent).toContain('Очередь BY-PL');          // рум из адреса вкладки
+    expect(box.textContent).toContain('заявок 2');
+    expect(box.textContent).toContain('дублей 1');
+    expect(box.textContent).toContain('отсеяно 9');
+    expect(box.textContent).toContain('состояние: рум: Очередь BY-PL');
+    expect(box.textContent).toContain('tg-web-ext/0.9.0');
+  });
+
+  it('отметка старше 12 минут — «нет связи»: модератор понимает, что вкладку закрыли', async () => {
+    const stale = { ...EXT_CLIENT, at: new Date(Date.now() - 20 * 60 * 1000).toISOString() };
+    const ui = createAdminUi({ extension: { clients: [stale], config: null, ingestEnabled: true } });
+    const box = await renderBlock(ui);
+    expect(box.textContent).toContain('нет связи');
+    expect(box.textContent).toContain('20 мин назад');
+  });
+
+  it('пауза, ошибка и «разметка не читается» видны в панели, а не молчат в браузере', async () => {
+    const ui = createAdminUi({
+      extension: {
+        clients: [{ ...EXT_CLIENT, paused: true, error: '429 Too Many Requests — ждём 30 с', unreadable: true }],
+        config: null, ingestEnabled: true,
+      },
+    });
+    const box = await renderBlock(ui);
+    expect(box.textContent).toContain('ПАУЗА');
+    expect(box.textContent).toContain('429 Too Many Requests');
+    expect(box.textContent).toContain('не читается');
+  });
+
+  it('никого нет — инструкция, как подключить аккаунт', async () => {
+    const ui = createAdminUi();
+    const box = await renderBlock(ui);
+    expect(box.textContent).toContain('Ни один браузер ещё не подключился');
+    expect(box.textContent).toContain('Самопроверка');
+  });
+
+  it('приём выключен (нет INGEST_TOKEN) — панель говорит, что сделать на сервере', async () => {
+    const ui = createAdminUi({ extension: { clients: [], config: null, ingestEnabled: false } });
+    const box = await renderBlock(ui);
+    expect(box.textContent).toContain('Приём выключен');
+    expect(box.textContent).toContain('INGEST_TOKEN');
+  });
+
+  it('белый список чатов и румов: форма заполнена, сохранение уходит PUT-ом', async () => {
+    const ui = createAdminUi({
+      extension: {
+        clients: [],
+        config: { whitelist: ['Граница', 'Водители Польша–Беларусь :: Очередь BY-PL', 'Водители Польша–Беларусь :: 7'], intervalSec: 90, paused: true, updatedAt: '2026-09-17T08:00:00.000Z' },
+        ingestEnabled: true,
+      },
+    });
+    const box = await renderBlock(ui);
+
+    const area = queryAll(box, 'textarea')[0]!;
+    expect(area.value).toBe('Граница\nВодители Польша–Беларусь :: Очередь BY-PL\nВодители Польша–Беларусь :: 7');
+    expect(box.textContent).toContain('::');  // синтаксис рума объяснён рядом с полем
+
+    area.value = 'Граница :: Очередь BY-PL\nГраница :: 7';
+    await ui.click(ui.buttonByText('сохранить и передать расширению', box));
+
+    const put = ui.requests.find((r) => r.method === 'PUT' && r.path === '/api/admin/extension/config');
+    expect(put?.body).toEqual({ whitelist: ['Граница :: Очередь BY-PL', 'Граница :: 7'], intervalSec: 90, paused: true });
+    expect(ui.toasts.join(' | ')).toContain('Передано расширению: 2 записей');
+  });
+
+  it('журнал приёма: ссылка на сообщение, заявка это или дубль', async () => {
+    const ui = createAdminUi({ ingestLog: { items: INGEST_LOG } });
+    const box = await renderBlock(ui);
+    expect(box.textContent).toContain('Что принято от аккаунта: последние 2 сообщений');
+    expect(box.textContent).toContain('заявка создана');
+    expect(box.textContent).toContain('Минск → Варшава');
+    expect(box.textContent).toContain('дубль: такая заявка уже была');
+    expect(box.textContent).toContain('расширение');  // подпись origin
+
+    const links = queryAll(box, 'a').map((a: any) => a.attrs?.href ?? a.getAttribute?.('href')).filter(Boolean);
+    expect(links).toContain('https://t.me/c/1234567890/528');   // приватная супергруппа
+    expect(links).toContain('https://t.me/drivers_pl_by/9001'); // публичный чат
+  });
+
+  it('журнал пуст — объясняем, что отсеянное сюда не попадает вовсе', async () => {
+    const ui = createAdminUi({ ingestLog: { items: [] } });
+    const box = await renderBlock(ui);
+    expect(box.textContent).toContain('Пока пусто');
+    expect(box.textContent).toContain('пассажирские');
+  });
+
+  it('нет миграции 0006 в журнале — подсказка про миграции', async () => {
+    const ui = createAdminUi({ ingestLog: { items: [], needsSetup: true } });
+    const box = await renderBlock(ui);
+    expect(box.textContent).toContain('0006_ingest.sql');
+  });
+
+  it('расширение доступно только админу: запросы идут с Bearer ADMIN_API_TOKEN', async () => {
+    const ui = createAdminUi({ extension: { clients: [EXT_CLIENT], config: null, ingestEnabled: true }, ingestLog: { items: INGEST_LOG } });
+    await renderBlock(ui);
+    const ext = ui.requests.find((r) => r.path === '/api/admin/extension');
+    const log = ui.requests.find((r) => r.path.startsWith('/api/admin/ingest/log'));
+    expect(ext?.auth).toBe('Bearer demo-admin-token');
+    expect(log?.auth).toBe('Bearer demo-admin-token');
   });
 });

@@ -6,7 +6,9 @@ import type { ListingOrigin } from './types.ts';
  * Ключи чатов-источников живут в трёх мирах:
  *   '-100<id>'      — бот добавлен в супергруппу/канал → служебная t.me/c/<id>/<msg>
  *   'web:<username>'— серверный сборщик публичных чатов → открытая t.me/<username>/<msg>
- *   'ext:<id>'      — приватный чат из браузерного расширения → ссылки нет,
+ *   'ext:<peer-id>' — приватный чат из браузерного расширения → для супергруппы
+ *                     и канала строим служебную t.me/c/<id>/<msg> (открывается
+ *                     у участников); для обычных групп и личных чатов ссылки нет,
  *                     если админ не задал её вручную в chat_links
  *
  * Приоритет всегда у chat_links: админ может задать красивую публичную ссылку
@@ -33,7 +35,19 @@ export function listingSourceLink(
   const web = /^web:([A-Za-z][A-Za-z0-9_]*)$/.exec(sourceChatId);
   if (web) return `https://t.me/${web[1]}${sourceMessageId != null ? `/${sourceMessageId}` : ''}`;
 
-  // приватный чат из расширения: вручную ссылку не задали — честно null
+  // приватный чат из расширения: если известен peer-id супергруппы/канала,
+  // работает служебная ссылка t.me/c/<id>/<msg> — она открывается у участников чата
+  // (именно её просит модератор: открыть сообщение и переслать самому).
+  const ext = /^ext:(-100\d+|-\d+|\d+)$/.exec(sourceChatId);
+  if (ext) {
+    const peer = ext[1]!;
+    const superFromExt = /^-100(\d+)$/.exec(peer);
+    if (superFromExt) {
+      return `https://t.me/c/${superFromExt[1]}${sourceMessageId != null ? `/${sourceMessageId}` : ''}`;
+    }
+    // обычная группа и личный чат служебных ссылок на сообщение не имеют
+    return null;
+  }
   if (sourceChatId.startsWith('ext:')) return null;
 
   // супергруппа/канал, где работает бот: id начинается с -100

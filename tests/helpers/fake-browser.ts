@@ -42,6 +42,8 @@ export interface FakeBrowserOptions {
 export class FakeBrowser {
   readonly context: Record<string, any>;
   readonly fetchCalls: FetchCall[] = [];
+  /** Ответы для отдельных маршрутов (настройки из панели, отметка «я жив»). */
+  readonly routes: Array<{ match: string | RegExp; response: Partial<FakeResponse> }> = [];
   readonly logs: string[] = [];
   readonly intervals: Array<() => void> = [];
   /** с каким интервалом зарегистрирован опрос (мс) */
@@ -74,12 +76,15 @@ export class FakeBrowser {
       },
       fetch: async (u: string, init: any) => {
         self.fetchCalls.push({ url: String(u), init });
-        const status = self.response.status ?? 200;
-        const text = self.response.body === undefined ? '' : JSON.stringify(self.response.body);
+        // маршрут с собственным ответом (например /api/extension/config) важнее общего
+        const route = self.routes.find((r) => (typeof r.match === 'string' ? String(u).includes(r.match) : r.match.test(String(u))));
+        const response = route ? route.response : self.response;
+        const status = response.status ?? 200;
+        const text = response.body === undefined ? '' : JSON.stringify(response.body);
         return {
           status,
           ok: status >= 200 && status < 300,
-          headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' && self.response.retryAfter != null ? String(self.response.retryAfter) : null) },
+          headers: { get: (name: string) => (name.toLowerCase() === 'retry-after' && response.retryAfter != null ? String(response.retryAfter) : null) },
           text: async () => text,
           json: async () => JSON.parse(text),
         };
@@ -157,13 +162,39 @@ export class FakeBrowser {
   panelText(): string { return this.panel()?.textContent ?? ''; }
 
   /** Что клиент сохранил в localStorage (настройки, счётчики, лог отправленного). */
-  saved(): { settings?: Record<string, any>; counters?: Record<string, number>; sentKeys?: string[] } {
+  saved(): {
+    settings?: Record<string, any>;
+    counters?: Record<string, number>;
+    sentKeys?: string[];
+    clientId?: string;
+    alive?: { at?: number; ok?: boolean; error?: string | null; version?: string; url?: string | null; status?: string };
+  } {
     return JSON.parse(this.store.get('poputchka') ?? '{}');
   }
 
-  /** Тело последнего запроса к серверу. */
+  /** Тело последней ОТПРАВКИ СООБЩЕНИЙ (служебные запросы не в счёт). */
   lastPayload(): any {
-    const call = this.fetchCalls[this.fetchCalls.length - 1];
+    const call = this.ingestCalls[this.ingestCalls.length - 1];
+    return call ? JSON.parse(call.init.body) : null;
+  }
+
+  /** Только отправки сообщений: POST /api/ingest. */
+  get ingestCalls(): FetchCall[] { return this.fetchCalls.filter((c) => c.url.includes('/api/ingest')); }
+
+  /** Отметки «аккаунт подключён» для панели. */
+  get heartbeatCalls(): FetchCall[] { return this.fetchCalls.filter((c) => c.url.includes('/api/extension/heartbeat')); }
+
+  /** Запросы настроек из панели. */
+  get configCalls(): FetchCall[] { return this.fetchCalls.filter((c) => c.url.includes('/api/extension/config')); }
+
+  /** Задать ответ отдельному маршруту (до запуска прохода). */
+  setRoute(match: string | RegExp, response: Partial<FakeResponse>): void {
+    this.routes.push({ match, response });
+  }
+
+  /** Тело последней отметки для панели. */
+  lastHeartbeat(): any {
+    const call = this.heartbeatCalls[this.heartbeatCalls.length - 1];
     return call ? JSON.parse(call.init.body) : null;
   }
 }

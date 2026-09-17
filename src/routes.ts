@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { aiQuotaLeft } from './ai.ts';
 import { collectPublicChats, lastCollectReport } from './collect.ts';
 import { ingestMessage, normalizeAt, parseMessageDate } from './ingest.ts';
@@ -8,10 +9,15 @@ import {
   bumpIngestDailyStats,
   countByOrigin,
   deleteWatchChat,
+  getExtensionConfig,
   getIngestDailyStats,
   getWatchChat,
+  listExtensionClients,
+  listIngestLog,
   listWatchChats,
   patchWatchChat,
+  putExtensionConfig,
+  recordExtensionClient,
   upsertChatLink,
 } from './store.ts';
 import type { Env, ListingOrigin } from './types.ts';
@@ -328,6 +334,18 @@ export async function runIngestBatch(
   };
 }
 
+/**
+ * Проверка авторизации ручек расширения (INGEST_TOKEN).
+ * Возвращает готовый ответ-отказ или null, если пускать можно.
+ */
+function ingestDenied(c: Context<{ Bindings: Env }>): Response | null {
+  const token = c.env.INGEST_TOKEN;
+  if (!token) return c.json({ error: 'ingest disabled: INGEST_TOKEN is not set' }, 503);
+  const auth = c.req.header('Authorization') ?? '';
+  if (auth !== `Bearer ${token}`) return c.json({ error: 'unauthorized' }, 401);
+  return null;
+}
+
 /** POST /api/ingest — своя авторизация (INGEST_TOKEN), не админская. */
 export function registerIngestRoutes(app: Hono<{ Bindings: Env }>): void {
   app.post('/api/ingest', async (c) => {
@@ -353,6 +371,36 @@ export function registerIngestRoutes(app: Hono<{ Bindings: Env }>): void {
     return c.json(body);
   });
 
+  /**
+   * Настройки расширения из панели: белый список чатов и румов, интервал, пауза.
+   * Авторизация та же, что у /api/ingest (INGEST_TOKEN): это не админская ручка,
+   * её дёргает контент-скрипт вкладки Telegram Web.
+   */
+  app.get('/api/extension/config', async (c) => {
+    const denied = ingestDenied(c);
+    if (denied) return denied;
+    return c.json({ ok: true, config: await getExtensionConfig(c.env) });
+  });
+
+  /**
+   * Отметка «аккаунт подключён»: расширение шлёт её каждый проход, панель показывает
+   * статус, текущий чат и рум, счётчики и ошибки. В ответе отдаём и настройки —
+   * так панель управляет расширением одним запросом вместо двух.
+   */
+  app.post('/api/extension/heartbeat', async (c) => {
+    const denied = ingestDenied(c);
+    if (denied) return denied;
+    const token = c.env.INGEST_TOKEN ?? '';
+    // отметка лёгкая, но не бесконечная: 600 в час на токен
+    const rl = await rateLimit(c.env, `ext-hb:${token.slice(0, 8)}`, 600, 3600);
+    if (!rl.allowed) return c.json({ error: 'rate_limited' }, 429);
+
+    const raw = await c.req.json().catch(() => null);
+    const client = await recordExtensionClient(c.env, raw);
+    if (!client) return c.json({ error: 'clientId: string 1..64 required' }, 400);
+    return c.json({ ok: true, clientId: client.clientId, config: await getExtensionConfig(c.env) });
+  });
+
   /** Жив ли приём (расширение может проверить токен до первого батча). */
   app.get('/api/ingest/status', async (c) => {
     const enabled = Boolean(c.env.INGEST_TOKEN);
@@ -366,6 +414,46 @@ export function registerIngestRoutes(app: Hono<{ Bindings: Env }>): void {
 /* ------------------------------------------------------------------ */
 
 export function registerAdminCollectRoutes(app: Hono<{ Bindings: Env }>): void {
+  /**
+   * Подключённые расширения («аккаунты Telegram») и настройки для них.
+   * Авторизация Telegram остаётся в браузере: сервер видит только то,
+   * что расширение само прислало в отметке.
+   */
+  app.get('/api/admin/extension', async (c) => {
+    const [clients, config] = await Promise.all([listExtensionClients(c.env), getExtensionConfig(c.env)]);
+    return c.json({ clients, config, ingestEnabled: Boolean(c.env.INGEST_TOKEN) });
+  });
+
+  /** Задать белому списку чатов и румов новое значение (расширение подхватит в следующий проход). */
+  app.put('/api/admin/extension/config', async (c) => {
+    const raw = await c.req.json().catch(() => null);
+    const config = await putExtensionConfig(c.env, raw);
+    if (!config) {
+      return c.json({
+        error: 'whitelist: нужен массив строк (или текст по строке на чат). ' +
+          'Примеры: «Граница», «t.me/granica_es», «Граница :: Очередь BY-PL», «Граница :: 7»',
+      }, 400);
+    }
+    return c.json({ ok: true, config });
+  });
+
+  /**
+   * Журнал приёма: последние сообщения и чем каждое стало — заявка, дубль или отсев.
+   * Для каждого сообщения отдаём ссылку (публичную t.me/<username>/<id> или служебную
+   * t.me/c/<id>/<id> для приватных супергрупп): модератор может открыть и переслать её сам.
+   */
+  app.get('/api/admin/ingest/log', async (c) => {
+    const limit = intOr(c.req.query('limit'), 50);
+    try {
+      return c.json({ items: await listIngestLog(c.env, limit) });
+    } catch (e) {
+      if (String(e).includes('no such table') || String(e).includes('no such column')) {
+        return c.json({ items: [], needsSetup: true, error: 'Примените миграции (npm run deploy)' });
+      }
+      throw e;
+    }
+  });
+
   /** Список чатов обхода: курсоры, счётчики, ошибки. */
   app.get('/api/admin/watch-chats', async (c) => {
     try {

@@ -84,6 +84,26 @@
   ];
 
   /** Юзернейм/ссылка чата (если клиент их показывает). */
+  /**
+   * Рум (топик) форум-супергруппы: в Telegram Web внутри темы шапка показывает
+   * ИМЯ ТЕМЫ, а имя группы — в отдельном элементе (или не показывается вовсе).
+   * Поэтому читаем оба варианта и отдаём наружу как topicTitle/groupTitle.
+   */
+  const TOPIC_TITLE_SELECTORS = [
+    '.chat-info .topic-title',
+    '[class*="topic-title"]',
+    '.topics-container .peer-title',
+    '.chat-info [data-topic-id]',
+  ];
+
+  /** Имя группы, когда открыт рум (кандидаты — сверху вниз). */
+  const GROUP_TITLE_SELECTORS = [
+    '.chat-info .group-title',
+    '[class*="forum"] .peer-title',
+    '.chat-info .status',
+    '.sidebar-header .peer-title',
+  ];
+
   const CHAT_USERNAME_SELECTORS = [
     '.chat-info .username',
     '.chat-info-username',
@@ -329,20 +349,63 @@
     const usernameNode = pickFirst(doc, CHAT_USERNAME_SELECTORS);
     const fromNode = /@([A-Za-z][A-Za-z0-9_]{3,31})/.exec(textOf(usernameNode) || '');
 
-    // URL клиента: /k/#@username, /a/#/im/p-1001234567890, /k/#-1001234567890
+    // Рум и группа — дополнительно к заголовку (см. TOPIC_TITLE_SELECTORS)
+    const topicFromDom = cleanDocTitle(textOf(pickFirst(doc, TOPIC_TITLE_SELECTORS)) || '');
+    const groupFromDom = cleanDocTitle(textOf(pickFirst(doc, GROUP_TITLE_SELECTORS)) || '');
+
+    // URL клиента: /k/#@username, /k/#-1001234567890, /a/#/im?p=g1234567890,
+    // /a/#/im?p=u123456, ?p=c123456, /a/#/im?p-1001234567890
     const hash = String((location && location.hash) || '');
     const href = String((location && location.href) || '');
     const loc = hash + ' ' + href;
     const linkUser = /t\.me\/(?:s\/)?@?([A-Za-z][A-Za-z0-9_]{3,31})(?!\/?\d)/i.exec(loc);
     const hashUser = /#@([A-Za-z][A-Za-z0-9_]{3,31})(?![A-Za-z0-9_])/.exec(loc) ||
       /#\/(?:im\/)?@([A-Za-z][A-Za-z0-9_]{3,31})(?![A-Za-z0-9_])/.exec(loc);
-    const peer = /[#/]p(-?\d{4,})(?!\d)/.exec(loc) || /#(-?\d{5,})(?!\d)/.exec(loc);
+    const peerRaw = /[?&/#]p=([guc]-?\d{4,})/.exec(loc) ||
+      /[#/]p([guc]?-?\d{4,})(?!\d)/.exec(loc) ||
+      /#([guc]-?\d{4,})(?![A-Za-z0-9_])/.exec(loc) ||
+      /#(-?\d{5,})(?!\d)/.exec(loc);
+    const peer = normalizePeer(peerRaw && peerRaw[1]);
+
+    // Рум по URL: ?topic=12, &thread=12, p=g123_12, #/im/p-100123_12, #-100123_12
+    const topicRaw = /[?&]topic=(\d{1,12})/.exec(loc) || /[?&]thread=(\d{1,12})/.exec(loc) ||
+      /p=[guc]-?\d{4,}_(\d{1,12})/.exec(loc) ||
+      /[#/]p[guc]?-?\d{4,}_(\d{1,12})(?!\d)/.exec(loc) ||
+      /#-?\d{5,}_(\d{1,12})(?!\d)/.exec(loc);
+
+    // Если в шапке тема, а группа прочиталась отдельно — заголовок это имя рума
+    const groupTitle = groupFromDom || null;
+    const topicTitle = topicFromDom || (groupTitle && title ? title : null);
 
     return {
       title: title || null,
       username: (linkUser && linkUser[1]) || (hashUser && hashUser[1]) || (fromNode && fromNode[1]) || null,
-      id: peer ? peer[1] : null,
+      id: peer ? peer.id : null,
+      kind: peer ? peer.kind : null,
+      groupTitle: groupTitle,
+      topicTitle: topicTitle && topicTitle !== groupTitle ? topicTitle : null,
+      topicId: topicRaw ? Number(topicRaw[1]) : null,
     };
+  }
+
+  /**
+   * peer-id из URL Telegram Web → канонический вид (тот же, что core.normalizePeerId).
+   * Здесь своя копия: dom.cjs должен работать и без ядра (юзерскрипт грузит их вместе,
+   * но порядок не гарантирован во всех сборках).
+   */
+  function normalizePeer(raw) {
+    const s = String(raw == null ? '' : raw).trim();
+    if (!s) return null;
+    let m = /^[gG](\d{4,})$/.exec(s);
+    if (m) return { id: '-100' + m[1], kind: 'supergroup' };
+    m = /^[cC](\d{4,})$/.exec(s);
+    if (m) return { id: '-' + m[1], kind: 'group' };
+    m = /^[uU](\d{4,})$/.exec(s);
+    if (m) return { id: m[1], kind: 'user' };
+    if (/^-100\d{4,}$/.test(s)) return { id: s, kind: 'supergroup' };
+    if (/^-\d{4,}$/.test(s)) return { id: s, kind: 'group' };
+    if (/^\d{4,}$/.test(s)) return { id: s, kind: 'user' };
+    return null;
   }
 
   /* ---------------------------------------------------------------- */

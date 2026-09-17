@@ -19,13 +19,21 @@
  *   localStorage.setItem('poputchka', JSON.stringify({ settings: {
  *     serverUrl: 'https://pop-utka.app',
  *     token: 'ВАШ_INGEST_TOKEN',
- *     whitelist: ['Водители Польша–Беларусь'],
+ *     // запись с '::' ограничивает один рум (топик) форум-чата — названием или id
+ *     whitelist: ['Водители Польша–Беларусь', 'Граница :: Очередь BY-PL', 'Граница :: 7'],
  *     intervalSec: 120, batchSize: 20, maxPerChat: 30,
  *     confirmMode: true, paused: false, maxAgeHours: 72, requireContact: false,
  *   }}));
  *   location.reload();
  *
  * Счётчики и лог отправленного живут там же; панель — справа внизу вкладки.
+ *
+ * Если на сервере заданы настройки из админки (вкладка «чаты» → «Аккаунт Telegram
+ * (расширение)»), они перекрывают локальные: клиент каждый проход спрашивает
+ * GET /api/extension/config и шлёт отметку POST /api/extension/heartbeat — по ней
+ * панель видит, что аккаунт на связи, какой чат и рум открыты и сколько принято.
+ * Ограничение юзерскрипта (@grant none): с https-страницы не достучаться до
+ * http://127.0.0.1 — для локальной отладки используйте расширение (extension/).
  */
 
 /* ---- extension/vendor/parser.js ---- */
@@ -154,8 +162,45 @@
   /* ---------------------------------------------------------------- */
 
   /** Запись белого списка: ссылка t.me/<username>, @username или название чата. */
+  /**
+   * Канонический peer-id чата из того, что отдаёт Telegram Web.
+   *
+   * Клиент показывает чат по-разному: /k/#-1001234567890, /a/#/im?p=g1234567890,
+   * ?p=u123456 (личный), ?p=c123456 (обычная группа). Приводим к одному виду —
+   * тогда из приватной супергруппы можно построить служебную ссылку
+   * https://t.me/c/<id>/<msgId>, которая открывается у участников чата
+   * (именно её просит модератор: «дать ссылку на сообщение, чтобы переслать»).
+   */
+  function normalizePeerId(raw) {
+    const s = String(raw == null ? '' : raw).trim();
+    if (!s) return null;
+    let m = /^[gG](\d{4,})$/.exec(s);                 // супергруппа/канал: g1234567890
+    if (m) return { id: '-100' + m[1], kind: 'supergroup' };
+    m = /^[cC](\d{4,})$/.exec(s);                     // обычная группа: c1234567890
+    if (m) return { id: '-' + m[1], kind: 'group' };
+    m = /^[uU](\d{4,})$/.exec(s);                     // личный чат: u1234567890
+    if (m) return { id: m[1], kind: 'user' };
+    if (/^-100\d{4,}$/.test(s)) return { id: s, kind: 'supergroup' };
+    if (/^-\d{4,}$/.test(s)) return { id: s, kind: 'group' };
+    if (/^\d{4,}$/.test(s)) return { id: s, kind: 'user' };
+    return null;
+  }
+
   function normalizeWhitelistEntry(raw) {
     const value = String(raw || '').trim();
+    if (!value) return null;
+    // «чат :: тема» — считать только один рум (топик) форум-супергруппы.
+    // Тема задаётся названием («Граница :: Очередь BY-PL») или id («Граница :: 12»).
+    const parts = value.split(/\s*(?:::|>>)\s*/);
+    const base = normalizeChatPart((parts[0] || '').trim());
+    if (!base) return null;
+    const topicPart = (parts[1] || '').trim();
+    if (!topicPart) return base;
+    if (/^\d{1,12}$/.test(topicPart)) return Object.assign(base, { topicId: Number(topicPart), topic: null });
+    return Object.assign(base, { topic: squashTitle(topicPart), topicId: null });
+  }
+
+  function normalizeChatPart(value) {
     if (!value) return null;
     const link = /t\.me\/(?:s\/)?@?([A-Za-z][A-Za-z0-9_]{3,31})/i.exec(value);
     if (link) return { kind: 'username', value: link[1].toLowerCase() };
@@ -165,7 +210,11 @@
   }
 
   function normalizeWhitelist(list) {
-    return (list || []).map(normalizeWhitelistEntry).filter(Boolean);
+    // терпим к строке (настройки из панели могут прийти текстом): режем по строкам/запятым
+    const arr = typeof list === 'string'
+      ? list.split(/[\n,;]+/)
+      : (Array.isArray(list) ? list : []);
+    return arr.map(normalizeWhitelistEntry).filter(Boolean);
   }
 
   /**
@@ -188,18 +237,73 @@
   function matchesWhitelist(chat, whitelist) {
     const entries = normalizeWhitelist(whitelist);
     if (entries.length === 0) return false;
-    const title = squashTitle(chat && chat.title);
+    const titles = chatTitleCandidates(chat);
     const username = String((chat && chat.username) || '').toLowerCase();
+    const topics = topicCandidates(chat);
+    const topicId = chat && chat.topicId != null && chat.topicId !== '' ? Number(chat.topicId) : null;
+
     for (const e of entries) {
-      if (e.kind === 'username') {
-        if (username && username === e.value) return true;
-        // в названии чата иногда пишут юзернейм — считаем совпадением
-        if (title && title.includes(e.value)) return true;
-      } else if (title && (title === e.value || title.includes(e.value) || e.value.includes(title))) {
-        return true;
-      }
+      if (!chatPartMatches(e, titles, username)) continue;
+      // запись без «:: тема» — берём весь чат, все румы
+      if (e.topic == null && e.topicId == null) return true;
+      if (e.topicId != null && topicId === e.topicId) return true;
+      if (e.topic && topics.some((t) => t === e.topic || t.includes(e.topic) || e.topic.includes(t))) return true;
+      // чат совпал, но рум задан и не совпал/не прочитался — не читаем (ТЗ: только белый список)
     }
     return false;
+  }
+
+  /** Названия, по которым узнаём чат: заголовок шапки и, если прочиталось, имя группы. */
+  function chatTitleCandidates(chat) {
+    const out = [];
+    const t = squashTitle(chat && chat.title);
+    const g = squashTitle(chat && chat.groupTitle);
+    if (t) out.push(t);
+    if (g && g !== t) out.push(g);
+    return out;
+  }
+
+  /** Названия, по которым узнаём рум (топик): явный заголовок темы или шапка при найденной группе. */
+  function topicCandidates(chat) {
+    const out = [];
+    const tt = squashTitle(chat && chat.topicTitle);
+    if (tt) out.push(tt);
+    const t = squashTitle(chat && chat.title);
+    const g = squashTitle(chat && chat.groupTitle);
+    if (g && t && t !== g) out.push(t);
+    return out;
+  }
+
+  function chatPartMatches(entry, titles, username) {
+    if (entry.kind === 'username') {
+      return Boolean(username && username === entry.value) ||
+        // в названии чата иногда пишут юзернейм — считаем совпадением
+        titles.some((t) => t.includes(entry.value));
+    }
+    return titles.some((t) => t === entry.value || t.includes(entry.value) || entry.value.includes(t));
+  }
+
+  /**
+   * Почему чат не подошёл белому списку — для диагностики (на логику не влияет).
+   * Отличает «чат не в списке» от «чат тот, но рум не совпал или не прочитался».
+   */
+  function whitelistMismatch(chat, whitelist) {
+    const entries = normalizeWhitelist(whitelist);
+    if (entries.length === 0) return 'Белый список пуст — сообщения не читаются вовсе.';
+    if (matchesWhitelist(chat, whitelist)) return null;
+    const titles = chatTitleCandidates(chat);
+    const username = String((chat && chat.username) || '').toLowerCase();
+    const sameChat = entries.filter((e) => chatPartMatches(e, titles, username));
+    if (sameChat.length === 0) return 'Чат не в белом списке.';
+    const topics = topicCandidates(chat);
+    const hasTopicId = Boolean(chat && chat.topicId != null && chat.topicId !== '');
+    if (topics.length === 0 && !hasTopicId) {
+      return 'Чат в белом списке с указанием рума, но тема (рум) в DOM не прочиталась — сообщения не читаются. ' +
+        'Уберите «:: тема» из записи, если нужны все румы этого чата.';
+    }
+    return 'Чат в белом списке, но рум не совпал: открыт «' +
+      (topics[0] || ('id ' + chat.topicId)) + '», а в списке «' +
+      sameChat.map((e) => (e.topic || (e.topicId != null ? 'id ' + e.topicId : 'все румы'))).join(', ') + '».';
   }
 
   /* ---------------------------------------------------------------- */
@@ -215,6 +319,8 @@
   function chatKeyOf(chat) {
     if (!chat) return null;
     if (chat.username) return 'web:' + String(chat.username).replace(/^@/, '');
+    const peer = normalizePeerId(chat && chat.id);
+    if (peer) return 'ext:' + peer.id;
     if (chat.id !== undefined && chat.id !== null && chat.id !== '') return 'ext:' + chat.id;
     if (chat.title) return 'ext:' + stableId('title:' + squashTitle(chat.title));
     return null;
@@ -423,6 +529,40 @@
     return out;
   }
 
+  /**
+   * Объяснить ошибку «вкладка не отвечает» так, чтобы было понятно, что делать.
+   * alive — последняя отметка контент-скрипта из storage (heartbeat), её может не быть.
+   */
+  function explainTabError(errText, alive, now) {
+    const text = String(errText || '');
+    const at = now || Date.now();
+    const ageMin = alive && alive.at ? Math.round((at - Number(alive.at)) / 60000) : null;
+    const ageText = ageMin == null ? null : (ageMin <= 0 ? 'только что' : ageMin + ' мин назад');
+
+    if (/Extension context invalidated/i.test(text)) {
+      return 'Расширение обновлено или переустановлено, а вкладка держит старую копию. Обновите web.telegram.org (F5). ' +
+        'Если не поможет — удалите расширение и загрузите папку extension/ заново: после повторного скачивания ZIP ' +
+        'папка часто переезжает, и Chrome продолжает смотреть в старое место.';
+    }
+    if (/Receiving end does not exist|message port closed|Could not establish connection/i.test(text)) {
+      if (alive && alive.ok === false && alive.error) {
+        return 'Контент-скрипт загрузился, но упал при инициализации: ' + alive.error +
+          '. Обновите вкладку; если повторится — пришлите этот текст.';
+      }
+      if (alive && ageText) {
+        return 'Расширение отвечало в этой вкладке ' + ageText + ', но сейчас не отвечает. ' +
+          'Обновите web.telegram.org (F5) и нажмите ещё раз.';
+      }
+      return 'Контент-скрипт не подключён к этой вкладке: она открыта раньше установки расширения ' +
+        '(или это другой профиль браузера). Обновите web.telegram.org (F5) — расширение подключается при загрузке страницы.';
+    }
+    if (/Cannot access|Permission|not allowed|May not be permitted/i.test(text)) {
+      return 'Браузер не даёт расширению доступ к вкладке: ' + text +
+        '. Убедитесь, что адрес вкладки начинается с https://web.telegram.org/';
+    }
+    return text ? 'Вкладка не ответила: ' + text : 'Вкладка не ответила.';
+  }
+
   /** Слить счётчики проходов. */
   function mergeCounters(a, b) {
     const base = a || {};
@@ -454,7 +594,13 @@
     lines.push('Чат: ' + (r.chat && r.chat.title ? r.chat.title : 'не определён') +
       (r.chat && r.chat.username ? ' (@' + r.chat.username + ')' : '') +
       ' → chatId ' + (r.chatKey || '—'));
-    lines.push('В белом списке: ' + (r.whitelisted ? 'да' : 'нет'));
+    if (r.chat && (r.chat.topicTitle || r.chat.topicId != null)) {
+      lines.push('Рум (тема): ' + (r.chat.topicTitle || '—') +
+        (r.chat.topicId != null ? ' (id ' + r.chat.topicId + ')' : ''));
+    }
+    if (r.chat && r.chat.groupTitle) lines.push('Группа: ' + r.chat.groupTitle);
+    lines.push('В белом списке: ' + (r.whitelisted ? 'да' : 'нет') +
+      (r.whitelistNote ? ' — ' + r.whitelistNote : ''));
     lines.push('Сообщений прочитано: ' + (r.total || 0) + ' (стратегия: ' + (r.strategy || '—') + ')');
     lines.push('К отправке: ' + (r.toSend || 0) + ', уже отправлено: ' + (r.alreadySent || 0) +
       ', отсеяно детектом: ' + (r.filtered || 0));
@@ -475,6 +621,11 @@
     withDefaults,
     clamp,
     serverUrlProblem,
+    explainTabError,
+    normalizePeerId,
+    whitelistMismatch,
+    chatTitleCandidates,
+    topicCandidates,
     normalizeWhitelist,
     normalizeWhitelistEntry,
     matchesWhitelist,
@@ -587,6 +738,26 @@
   ];
 
   /** Юзернейм/ссылка чата (если клиент их показывает). */
+  /**
+   * Рум (топик) форум-супергруппы: в Telegram Web внутри темы шапка показывает
+   * ИМЯ ТЕМЫ, а имя группы — в отдельном элементе (или не показывается вовсе).
+   * Поэтому читаем оба варианта и отдаём наружу как topicTitle/groupTitle.
+   */
+  const TOPIC_TITLE_SELECTORS = [
+    '.chat-info .topic-title',
+    '[class*="topic-title"]',
+    '.topics-container .peer-title',
+    '.chat-info [data-topic-id]',
+  ];
+
+  /** Имя группы, когда открыт рум (кандидаты — сверху вниз). */
+  const GROUP_TITLE_SELECTORS = [
+    '.chat-info .group-title',
+    '[class*="forum"] .peer-title',
+    '.chat-info .status',
+    '.sidebar-header .peer-title',
+  ];
+
   const CHAT_USERNAME_SELECTORS = [
     '.chat-info .username',
     '.chat-info-username',
@@ -832,20 +1003,63 @@
     const usernameNode = pickFirst(doc, CHAT_USERNAME_SELECTORS);
     const fromNode = /@([A-Za-z][A-Za-z0-9_]{3,31})/.exec(textOf(usernameNode) || '');
 
-    // URL клиента: /k/#@username, /a/#/im/p-1001234567890, /k/#-1001234567890
+    // Рум и группа — дополнительно к заголовку (см. TOPIC_TITLE_SELECTORS)
+    const topicFromDom = cleanDocTitle(textOf(pickFirst(doc, TOPIC_TITLE_SELECTORS)) || '');
+    const groupFromDom = cleanDocTitle(textOf(pickFirst(doc, GROUP_TITLE_SELECTORS)) || '');
+
+    // URL клиента: /k/#@username, /k/#-1001234567890, /a/#/im?p=g1234567890,
+    // /a/#/im?p=u123456, ?p=c123456, /a/#/im?p-1001234567890
     const hash = String((location && location.hash) || '');
     const href = String((location && location.href) || '');
     const loc = hash + ' ' + href;
     const linkUser = /t\.me\/(?:s\/)?@?([A-Za-z][A-Za-z0-9_]{3,31})(?!\/?\d)/i.exec(loc);
     const hashUser = /#@([A-Za-z][A-Za-z0-9_]{3,31})(?![A-Za-z0-9_])/.exec(loc) ||
       /#\/(?:im\/)?@([A-Za-z][A-Za-z0-9_]{3,31})(?![A-Za-z0-9_])/.exec(loc);
-    const peer = /[#/]p(-?\d{4,})(?!\d)/.exec(loc) || /#(-?\d{5,})(?!\d)/.exec(loc);
+    const peerRaw = /[?&/#]p=([guc]-?\d{4,})/.exec(loc) ||
+      /[#/]p([guc]?-?\d{4,})(?!\d)/.exec(loc) ||
+      /#([guc]-?\d{4,})(?![A-Za-z0-9_])/.exec(loc) ||
+      /#(-?\d{5,})(?!\d)/.exec(loc);
+    const peer = normalizePeer(peerRaw && peerRaw[1]);
+
+    // Рум по URL: ?topic=12, &thread=12, p=g123_12, #/im/p-100123_12, #-100123_12
+    const topicRaw = /[?&]topic=(\d{1,12})/.exec(loc) || /[?&]thread=(\d{1,12})/.exec(loc) ||
+      /p=[guc]-?\d{4,}_(\d{1,12})/.exec(loc) ||
+      /[#/]p[guc]?-?\d{4,}_(\d{1,12})(?!\d)/.exec(loc) ||
+      /#-?\d{5,}_(\d{1,12})(?!\d)/.exec(loc);
+
+    // Если в шапке тема, а группа прочиталась отдельно — заголовок это имя рума
+    const groupTitle = groupFromDom || null;
+    const topicTitle = topicFromDom || (groupTitle && title ? title : null);
 
     return {
       title: title || null,
       username: (linkUser && linkUser[1]) || (hashUser && hashUser[1]) || (fromNode && fromNode[1]) || null,
-      id: peer ? peer[1] : null,
+      id: peer ? peer.id : null,
+      kind: peer ? peer.kind : null,
+      groupTitle: groupTitle,
+      topicTitle: topicTitle && topicTitle !== groupTitle ? topicTitle : null,
+      topicId: topicRaw ? Number(topicRaw[1]) : null,
     };
+  }
+
+  /**
+   * peer-id из URL Telegram Web → канонический вид (тот же, что core.normalizePeerId).
+   * Здесь своя копия: dom.cjs должен работать и без ядра (юзерскрипт грузит их вместе,
+   * но порядок не гарантирован во всех сборках).
+   */
+  function normalizePeer(raw) {
+    const s = String(raw == null ? '' : raw).trim();
+    if (!s) return null;
+    let m = /^[gG](\d{4,})$/.exec(s);
+    if (m) return { id: '-100' + m[1], kind: 'supergroup' };
+    m = /^[cC](\d{4,})$/.exec(s);
+    if (m) return { id: '-' + m[1], kind: 'group' };
+    m = /^[uU](\d{4,})$/.exec(s);
+    if (m) return { id: m[1], kind: 'user' };
+    if (/^-100\d{4,}$/.test(s)) return { id: s, kind: 'supergroup' };
+    if (/^-\d{4,}$/.test(s)) return { id: s, kind: 'group' };
+    if (/^\d{4,}$/.test(s)) return { id: s, kind: 'user' };
+    return null;
   }
 
   /* ---------------------------------------------------------------- */
@@ -991,17 +1205,32 @@
 (function () {
   'use strict';
 
-  const core = (typeof PoputkaCore !== 'undefined') ? PoputkaCore : require('./core.cjs');
-  const dom = (typeof PoputkaDom !== 'undefined') ? PoputkaDom : require('./dom.cjs');
-  const parser = (typeof PoputkaParser !== 'undefined') ? PoputkaParser : null;
+  /* Слушатель сообщений регистрируется ПЕРВЫМ делом: даже если что-то ниже
+   * упадёт, попап получит ответ с текстом ошибки, а не «вкладка не отвечает». */
+  const boot = { version: '1.0.0', startedAt: Date.now(), ok: false, error: null };
+
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+      (async () => {
+        try {
+          sendResponse(await handleMessage(msg));
+        } catch (e) {
+          try { sendResponse({ ok: false, boot, error: String(e && e.message || e) }); } catch { /* канал закрыт */ }
+        }
+      })();
+      return true; // ответ асинхронный
+    });
+  }
+
+  let core = null;
+  let dom = null;
+  let parser = null;
+  let store = null;
 
   const NS = 'poputchka';
-  const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local)
-    ? core.chromeStore(NS)
-    : core.localStore(NS);
 
   const state = {
-    settings: core.withDefaults({}),
+    settings: { whitelist: [], intervalSec: 120, batchSize: 20, maxPerChat: 30, confirmMode: true, paused: false, maxAgeHours: 72, requireContact: false, serverUrl: '', token: '' },
     counters: {},
     sentKeys: [],
     pending: [],          // найдено, но ждёт подтверждения (confirmMode)
@@ -1012,7 +1241,29 @@
     timer: null,
     lastDiagnostic: null,
     unreadable: false,
+    clientId: null,       // метка этого браузера для панели (heartbeat)
+    lastChat: null,       // какой чат/рум видели последним
+    configFromServer: false,
+    configError: null,
   };
+
+  try {
+    core = (typeof PoputkaCore !== 'undefined') ? PoputkaCore : require('./core.cjs');
+    dom = (typeof PoputkaDom !== 'undefined') ? PoputkaDom : require('./dom.cjs');
+    parser = (typeof PoputkaParser !== 'undefined') ? PoputkaParser : null;
+    store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local)
+      ? core.chromeStore(NS)
+      : core.localStore(NS);
+    state.settings = core.withDefaults({});
+  } catch (e) {
+    boot.error = 'не удалось загрузить ядро сборщика: ' + String(e && e.message || e) +
+      ' (переустановите расширение: chrome://extensions → «Обновить», затем F5 на web.telegram.org)';
+  }
+
+  /** Состояние для попапа — даже если часть модулей не загрузилась. */
+  function safeState() {
+    try { return publicState(); } catch (e) { return { error: String(e && e.message || e) }; }
+  }
 
   /* ---------------------------------------------------------------- */
   /* Хранилище                                                         */
@@ -1023,6 +1274,15 @@
     state.settings = core.withDefaults(saved.settings);
     state.counters = saved.counters || {};
     state.sentKeys = Array.isArray(saved.sentKeys) ? saved.sentKeys : [];
+    state.clientId = saved.clientId || newClientId();
+  }
+
+  /** Метка этого браузера: панель показывает, какие аккаунты подключены. */
+  function newClientId() {
+    const rnd = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
+    return String(rnd).slice(0, 36);
   }
 
   async function persist() {
@@ -1030,6 +1290,13 @@
       settings: state.settings,
       counters: state.counters,
       sentKeys: core.pruneSentLog(state.sentKeys),
+      clientId: state.clientId,
+      // отметка «я жив» — по ней попап объясняет «вкладка не отвечает»
+      alive: {
+        at: Date.now(), ok: boot.ok, error: boot.error, version: boot.version,
+        url: (typeof location !== 'undefined' && location.href) || null,
+        status: state.status,
+      },
     });
   }
 
@@ -1126,25 +1393,41 @@
   /* ---------------------------------------------------------------- */
 
   async function tick() {
-    if (state.settings.paused) { state.status = 'пауза'; render(); return; }
+    if (!core || !dom) { state.error = boot.error; render(); return; }
+
+    // настройки может задавать панель (белый список чатов и румов, интервал, пауза)
+    await syncConfig();
+
+    if (state.settings.paused) { state.status = 'пауза'; render(); await postHeartbeat(); return; }
     if (Date.now() < state.backoffUntil) {
       state.status = 'ждем: ' + (state.backoffUntil === Infinity ? 'остановлено' : Math.ceil((state.backoffUntil - Date.now()) / 1000) + ' с');
       render();
+      await postHeartbeat();
       return;
     }
 
     const chat = dom.readChatInfo(document, window.location);
     const chatKey = core.chatKeyOf(chat);
     const whitelisted = core.matchesWhitelist(chat, state.settings.whitelist);
+    state.lastChat = {
+      chatKey: chatKey, title: chat.title, username: chat.username, kind: chat.kind,
+      groupTitle: chat.groupTitle, topicTitle: chat.topicTitle, topicId: chat.topicId,
+      whitelisted: whitelisted, at: new Date().toISOString(),
+    };
 
     if (!chatKey || !whitelisted) {
       // всё, что не в белом списке, игнорируется ПОЛНОСТЬЮ — сообщения не читаем
+      const note = chatKey ? core.whitelistMismatch(chat, state.settings.whitelist) : null;
       state.unreadable = false;
-      state.status = chat.title
-        ? `чат «${chat.title}» не в белом списке — пропускаем`
-        : 'чат не определён (откройте диалог)';
-      state.lastDiagnostic = { url: location.href, chat, chatKey, whitelisted, total: 0, toSend: 0 };
+      state.status = !chatKey
+        ? 'чат не определён (откройте диалог)'
+        : (note || `чат «${chat.title || chatKey}» не в белом списке — пропускаем`);
+      state.lastDiagnostic = {
+        url: location.href, chat, chatKey, whitelisted, whitelistNote: note, total: 0, toSend: 0,
+      };
       render();
+      await persist();
+      await postHeartbeat();
       return;
     }
 
@@ -1190,6 +1473,7 @@
       state.status = `чат «${chat.title}»: прочитано ${harvested.messages.length}, нового нет`;
       await persist();
       render();
+      await postHeartbeat();
       return;
     }
 
@@ -1199,12 +1483,94 @@
       state.status = `найдено ${fresh.length} — подтвердите отправку`;
       await persist();
       render();
+      await postHeartbeat();
       return;
     }
 
     state.status = `найдено ${fresh.length} — отправляю`;
     render();
     await sendPending({ messages: fresh });
+    await postHeartbeat();
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Связь с панелью: настройки оттуда и отметка «аккаунт подключён»    */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Забрать настройки из панели (белый список чатов и румов, интервал, пауза).
+   * Сервер без этих ручек отвечает 404 — тогда работаем на локальных настройках.
+   */
+  async function syncConfig() {
+    if (!state.settings.serverUrl || !state.settings.token) return null;
+    try {
+      const res = await fetch(state.settings.serverUrl + '/api/extension/config', {
+        headers: { Authorization: 'Bearer ' + state.settings.token },
+        cache: 'no-store',
+      });
+      if (!res.ok) { state.configFromServer = false; return null; }
+      const body = await res.json().catch(() => null);
+      const cfg = body && body.config;
+      if (!cfg) { state.configFromServer = false; return null; }
+      return await applyConfig(cfg);
+    } catch (e) {
+      state.configError = 'Настройки из панели не получены: ' + String(e && e.message || e);
+      return null;
+    }
+  }
+
+  /** Применить настройки, присланные панелью (белый список чатов и румов, интервал, пауза). */
+  async function applyConfig(cfg) {
+    if (!cfg || typeof cfg !== 'object') { state.configFromServer = false; return null; }
+    const before = JSON.stringify(state.settings);
+    if (Array.isArray(cfg.whitelist) || typeof cfg.whitelist === 'string') {
+      const list = typeof cfg.whitelist === 'string' ? cfg.whitelist.split(/[\n,;]+/) : cfg.whitelist;
+      state.settings.whitelist = list.map((x) => String(x).trim()).filter(Boolean);
+    }
+    if (cfg.intervalSec != null) {
+      state.settings.intervalSec = core.clamp(Number(cfg.intervalSec) || 120, 60, 600);
+      restartTimer(); // интервал мог измениться
+    }
+    if (typeof cfg.paused === 'boolean') state.settings.paused = cfg.paused;
+    state.configFromServer = true;
+    state.configError = null;
+    if (JSON.stringify(state.settings) !== before) { await persist(); render(); }
+    return cfg;
+  }
+
+  /** Отметка для панели: аккаунт подключён, такой-то чат/рум, такие-то счётчики. */
+  async function postHeartbeat() {
+    if (!state.settings.serverUrl || !state.settings.token) return;
+    try {
+      const res = await fetch(state.settings.serverUrl + '/api/extension/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + state.settings.token },
+        body: JSON.stringify({
+          clientId: state.clientId || newClientId(),
+          collector: core.COLLECTOR,
+          at: new Date().toISOString(),
+          url: location.href,
+          chat: state.lastChat,
+          counters: state.counters,
+          status: state.status,
+          error: state.error,
+          pending: state.pending.length,
+          unreadable: state.unreadable,
+          whitelist: state.settings.whitelist,
+          intervalSec: state.settings.intervalSec,
+          paused: state.settings.paused,
+          confirmMode: state.settings.confirmMode,
+        }),
+        cache: 'no-store',
+      });
+      // настройки панель отдаёт вместе с ответом на отметку — одним запросом
+      if (res && res.ok) {
+        const body = await res.json().catch(() => null);
+        if (body && body.config) await applyConfig(body.config);
+      }
+    } catch {
+      // панель не увидит отметку — это не повод останавливать сбор
+    }
   }
 
   /* ---------------------------------------------------------------- */
@@ -1369,23 +1735,32 @@
     render();
   }
 
-  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-      (async () => {
-        if (!msg || !msg.type) return sendResponse({ ok: false });
-        if (msg.type === 'pk:reload') { await reloadSettings(); return sendResponse({ ok: true, state: publicState() }); }
-        if (msg.type === 'pk:state') return sendResponse({ ok: true, state: publicState() });
-        if (msg.type === 'pk:diagnostic') { await tick(); return sendResponse({ ok: true, diagnostic: core.diagnostic(state.lastDiagnostic), raw: state.lastDiagnostic }); }
-        if (msg.type === 'pk:pause') { state.settings.paused = !state.settings.paused; await persist(); render(); return sendResponse({ ok: true, state: publicState() }); }
-        if (msg.type === 'pk:send') { await sendPending(); return sendResponse({ ok: true, state: publicState() }); }
-        if (msg.type === 'pk:reset') {
-          state.counters = {}; state.sentKeys = []; state.pending = []; state.error = null;
-          await persist(); render(); return sendResponse({ ok: true, state: publicState() });
-        }
-        return sendResponse({ ok: false });
-      })();
-      return true; // ответ асинхронный
-    });
+  /** Команды попапа. Отвечаем даже когда инициализация не удалась (boot.ok === false). */
+  async function handleMessage(msg) {
+    if (!msg || !msg.type) return { ok: false, boot };
+    if (msg.type === 'pk:ping') return { ok: boot.ok, boot, state: safeState() };
+    if (!boot.ok || !core) {
+      return { ok: false, boot, error: boot.error || 'контент-скрипт не инициализирован' };
+    }
+    if (msg.type === 'pk:reload') { await reloadSettings(); return { ok: true, boot, state: publicState() }; }
+    if (msg.type === 'pk:state') return { ok: true, boot, state: publicState() };
+    if (msg.type === 'pk:diagnostic') {
+      await tick();
+      return { ok: true, boot, diagnostic: core.diagnostic(state.lastDiagnostic), raw: state.lastDiagnostic, state: publicState() };
+    }
+    if (msg.type === 'pk:pause') {
+      state.settings.paused = !state.settings.paused;
+      await persist(); render(); await postHeartbeat();
+      return { ok: true, boot, state: publicState() };
+    }
+    if (msg.type === 'pk:send') { await sendPending(); await postHeartbeat(); return { ok: true, boot, state: publicState() }; }
+    if (msg.type === 'pk:sync') { const cfg = await syncConfig(); return { ok: true, boot, config: cfg, state: publicState() }; }
+    if (msg.type === 'pk:reset') {
+      state.counters = {}; state.sentKeys = []; state.pending = []; state.error = null;
+      await persist(); render();
+      return { ok: true, boot, state: publicState() };
+    }
+    return { ok: false, boot, error: 'неизвестная команда: ' + msg.type };
   }
 
   function publicState() {
@@ -1396,13 +1771,24 @@
       status: state.status,
       error: state.error,
       diagnostic: state.lastDiagnostic,
+      clientId: state.clientId,
+      chat: state.lastChat,
+      configFromServer: state.configFromServer,
+      configError: state.configError,
+      unreadable: state.unreadable,
+      version: boot.version,
     };
   }
 
   (async function init() {
+    if (!core || !dom) { boot.ok = false; try { render(); } catch { /* панель не важна */ } return; }
+    boot.ok = true;
     await loadState();
     render();
     restartTimer();
+    await persist();          // отметка «расширение живо в этой вкладке»
+    await syncConfig();
+    await postHeartbeat();
     // первый проход — не сразу: даём клиенту дорисовать список сообщений
     setTimeout(() => { tick().catch(() => undefined); }, 4000);
     console.info('[попутка.] сборщик запущен: интервал', state.settings.intervalSec + 'с',
