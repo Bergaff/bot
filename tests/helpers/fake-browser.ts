@@ -4,7 +4,7 @@
  * content.js — IIFE без экспортов, поэтому проверяем его «чёрным ящиком»:
  * что он прочитал в DOM, какой запрос ушёл в fetch, что написано в панели и
  * что сохранилось в localStorage. Всё остальное (детект, ключи, батчи) уже
- * покрыто тестами core.cjs и dom.cjs.
+ * покрыто тестами core.js и dom.js.
  */
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -112,7 +112,7 @@ export class FakeBrowser {
     this.store.set('poputchka', JSON.stringify(saved));
 
     // те же файлы и в том же порядке, что и в manifest.json
-    for (const file of ['vendor/parser.js', 'core.cjs', 'dom.cjs', 'content.js']) {
+    for (const file of ['vendor/parser.js', 'core.js', 'dom.js', 'content.js']) {
       vm.runInContext(readFileSync(new URL(file, EXT), 'utf8'), this.context, { filename: file });
     }
   }

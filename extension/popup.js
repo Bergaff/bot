@@ -94,7 +94,7 @@
   }
 
   /** Файлы контент-скрипта — те же и в том же порядке, что в manifest.json. */
-  const CONTENT_FILES = ['vendor/parser.js', 'core.cjs', 'dom.cjs', 'content.js'];
+  const CONTENT_FILES = ['vendor/parser.js', 'core.js', 'dom.js', 'content.js'];
 
   /** Активная вкладка Telegram Web: { tab } или { error }. */
   async function telegramTab() {

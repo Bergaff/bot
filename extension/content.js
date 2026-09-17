@@ -36,7 +36,7 @@
   /* Слушатель сообщений регистрируется ПЕРВЫМ делом: даже если что-то ниже
    * упадёт, попап получит ответ с текстом ошибки, а не «вкладка не отвечает». */
   const boot = {
-    version: '1.0.1',
+    version: '1.0.2',
     startedAt: Date.now(),
     ok: false,
     error: null,
@@ -104,8 +104,8 @@
   };
 
   try {
-    core = (typeof PoputkaCore !== 'undefined') ? PoputkaCore : require('./core.cjs');
-    dom = (typeof PoputkaDom !== 'undefined') ? PoputkaDom : require('./dom.cjs');
+    core = (typeof PoputkaCore !== 'undefined') ? PoputkaCore : require('./core.js');
+    dom = (typeof PoputkaDom !== 'undefined') ? PoputkaDom : require('./dom.js');
     parser = (typeof PoputkaParser !== 'undefined') ? PoputkaParser : null;
     store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local)
       ? core.chromeStore(NS)
@@ -291,7 +291,7 @@
     if (harvested.unreadable || harvested.messages.length === 0) {
       state.unreadable = true;
       state.error = 'Не могу прочитать сообщения: Telegram Web изменил разметку или чат пуст. ' +
-        'Сбор paused, пока не починим селекторы (см. extension/dom.cjs).';
+        'Сбор paused, пока не починим селекторы (см. extension/dom.js).';
       state.counters = core.mergeCounters(state.counters, { errors: 1 });
       state.lastDiagnostic = {
         url: location.href, chat, chatKey, whitelisted: true,

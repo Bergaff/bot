@@ -1,5 +1,5 @@
 /**
- * Мини-DOM для тестов extension/dom.cjs: те же duck-typed интерфейсы,
+ * Мини-DOM для тестов extension/dom.js: те же duck-typed интерфейсы,
  * что использует код (querySelector/querySelectorAll/attributes/textContent),
  * но без браузера. Поддерживаются селекторы, которые реально встречаются
  * в списках домена: '.class', 'tag', 'tag[attr]', 'tag[attr*="v"]', '.a .b'.
@@ -226,7 +226,7 @@ export function bubblesList(messages: FakeNode[]): FakeNode {
 
 /**
  * Подобие `document`: body + documentElement, createElement, getElementById,
- * querySelector(All). Хватает и для чтения ленты (dom.cjs), и для панели/админки.
+ * querySelector(All). Хватает и для чтения ленты (dom.js), и для панели/админки.
  */
 export class FakeDocument {
   readonly documentElement = new FakeNode('html');

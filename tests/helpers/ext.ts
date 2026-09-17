@@ -1,7 +1,7 @@
 /**
  * Подключение клиентских модулей расширения к тестам.
  *
- * extension/core.cjs и extension/dom.cjs — UMD-файлы (в браузере их грузит
+ * extension/core.js и extension/dom.js — UMD-файлы (в браузере их грузит
  * обычный <script>, в MV3 ES-модули для content scripts недоступны), поэтому
  * здесь они достаются через createRequire, как node:sqlite в local/node-sqlite.ts.
  * Vite/Vitest .cjs не разрешает — Node делает это сам.
@@ -130,5 +130,5 @@ export interface DomApi {
   isReadable: (doc: any) => boolean;
 }
 
-export const core = nodeRequire('../../extension/core.cjs') as CoreApi;
-export const dom = nodeRequire('../../extension/dom.cjs') as DomApi;
+export const core = nodeRequire('../../extension/core.js') as CoreApi;
+export const dom = nodeRequire('../../extension/dom.js') as DomApi;

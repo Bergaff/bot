@@ -14,8 +14,9 @@
  *      синтезируем устойчивый id (core.syntheticMessageId): серверная
  *      дедупликация по (chatId, messageId) при этом продолжает работать.
  *
- * Формат UMD/.cjs — как у core.cjs: подключается обычным <script> и
- * тестируется без браузера (tests/extension-core.test.ts).
+ * Формат UMD — как у core.js: подключается обычным <script> и тестируется
+ * без браузера (tests/extension-dom.test.ts). Расширение .js обязательно:
+ * .cjs Chrome не считает JavaScript и не внедряет контент-скрипт вовсе.
  */
 (function (root, factory) {
   const api = factory();
@@ -390,7 +391,7 @@
 
   /**
    * peer-id из URL Telegram Web → канонический вид (тот же, что core.normalizePeerId).
-   * Здесь своя копия: dom.cjs должен работать и без ядра (юзерскрипт грузит их вместе,
+   * Здесь своя копия: dom.js должен работать и без ядра (юзерскрипт грузит их вместе,
    * но порядок не гарантирован во всех сборках).
    */
   function normalizePeer(raw) {

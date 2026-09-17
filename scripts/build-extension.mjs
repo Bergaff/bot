@@ -34,15 +34,15 @@ console.log(`✓ extension/vendor/parser.js — ${(parserBytes / 1024).toFixed(1
 
 const parts = [
   'extension/vendor/parser.js',
-  'extension/core.cjs',
-  'extension/dom.cjs',
+  'extension/core.js',
+  'extension/dom.js',
   'extension/content.js',
 ];
 
 const header = `// ==UserScript==
 // @name         попутка. — сбор объявлений из чатов Telegram Web
 // @namespace    https://github.com/Bergaff/bot
-// @version      1.0.1
+// @version      1.0.2
 // @description  Только чтение: находит объявления о передаче посылок в открытой вкладке Telegram Web и отправляет их на сервер попутки (POST /api/ingest). Ничего не публикует от вашего имени.
 // @match        https://web.telegram.org/*
 // @run-at       document-idle
@@ -65,6 +65,10 @@ const header = `// ==UserScript==
  *   location.reload();
  *
  * Счётчики и лог отправленного живут там же; панель — справа внизу вкладки.
+ *
+ * Версия 1.0.2: ядро и DOM-модуль называются core.js и dom.js — Chrome определяет
+ * тип файла контент-скрипта по расширению и не грузил .cjs («Invalid script mime
+ * type»), из-за чего не внедрялся весь список файлов и вкладка «не отвечала».
  *
  * Версия 1.0.1: контент-скрипт помечает свой экземпляр на window и при повторном
  * внедрении не плодит второй таймер (попап расширения умеет подключаться к уже

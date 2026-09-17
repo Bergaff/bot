@@ -1,0 +1,5 @@
+{
+  "//": "Не часть npm: этот файл нужен только Node, чтобы core.js и dom.js в папке расширения оставались CommonJS (их подключают через createRequire в тестах). В основном package.json стоит \"type\": \"module\", без этого файла Node считал бы их ES-модулями. Chrome на файл не смотрит.",
+  "type": "commonjs",
+  "private": true
+}

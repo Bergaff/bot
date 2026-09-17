@@ -2,7 +2,7 @@
  * Тесты оркестратора client-части: extension/content.js (этап 3 ТЗ).
  *
  * content.js запускается в мини-браузере (tests/helpers/fake-browser.ts):
- * поддельные document/localStorage/fetch/таймеры, настоящие core.cjs, dom.cjs
+ * поддельные document/localStorage/fetch/таймеры, настоящие core.js, dom.js
  * и бандл parser.ts. Проверяем поведение, которое обещано в ТЗ:
  *   - белый список: чужие чаты не читаются вовсе;
  *   - на сервер уходит только похожее на объявление, батчами ≤ batchSize;

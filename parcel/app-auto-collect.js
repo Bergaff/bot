@@ -394,7 +394,7 @@ function extClientsList(clients) {
       c.status ? el('p', { class: 'muted', text: 'состояние: ' + c.status }) : null,
       c.error ? el('p', { class: 'empty-note', text: '⚠ ' + c.error }) : null,
       c.unreadable
-        ? el('p', { class: 'empty-note', text: '⚠ Разметка Telegram Web не читается: данные не отправляются. Нужна починка селекторов (extension/dom.cjs).' })
+        ? el('p', { class: 'empty-note', text: '⚠ Разметка Telegram Web не читается: данные не отправляются. Нужна починка селекторов (extension/dom.js).' })
         : null,
     ].filter(Boolean));
   }));

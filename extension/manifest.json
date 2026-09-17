@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "попутка. — сбор объявлений из чатов",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Только чтение: находит в открытой вкладке Telegram Web объявления о передаче посылок и отправляет их на сервер попутки (POST /api/ingest). Ничего не публикует и не отправляет от вашего имени.",
   "permissions": [
     "storage",
@@ -22,8 +22,8 @@
       ],
       "js": [
         "vendor/parser.js",
-        "core.cjs",
-        "dom.cjs",
+        "core.js",
+        "dom.js",
         "content.js"
       ],
       "run_at": "document_idle",
