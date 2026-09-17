@@ -341,15 +341,16 @@
    * вердикт (объявление / отсеяно / дубль / старое), причина и ссылка на
    * первоисточник — t.me/<чат>[/<рум>]/<сообщение>, чтобы открыть и переслать вручную.
    */
-  function renderRecent(st) {
+  function renderRecent(st, tabError) {
     const box = $('recent');
     if (!box) return;
     box.replaceChildren();
     const recs = (st && st.recent) || [];
     if (!recs.length) {
-      box.append(mk('p', 'rec-empty',
-        'Список пуст: откройте в Telegram Web чат из белого списка и нажмите «Диагностика вкладки» — ' +
-        'расширение прочитает сообщения и покажет вердикт по каждому.'));
+      box.append(mk('p', 'rec-empty', tabError
+        ? 'Вкладка не отвечает, журнал не прочитать: ' + tabError
+        : 'Список пуст: откройте в Telegram Web чат из белого списка и нажмите «Диагностика вкладки» — ' +
+          'расширение прочитает сообщения и покажет вердикт по каждому.'));
       return;
     }
 
@@ -385,7 +386,11 @@
   /** Спросить состояние вкладки и показать счётчики + журнал разбора (без внедрения). */
   async function refreshState() {
     const res = await notifyTab({ type: 'pk:state' });
-    if (!res || !res.state) { renderRecent(null); return; }
+    if (!res || !res.state) {
+      // вкладка не отвечает: не пугаем ошибкой при открытии попапа, но объясняем в журнале
+      renderRecent(null, res && res.error ? res.error : null);
+      return;
+    }
     renderStats(res.state.counters || {});
     renderRecent(res.state);
     if (res.state.diagnostic && res.state.diagnostic.topicNote) show('warn', res.state.diagnostic.topicNote);
