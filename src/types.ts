@@ -78,6 +78,11 @@ export interface ListingInput {
   sourceChat?: string | null;
   sourceChatId?: string | null;
   sourceMessageId?: number | null;
+  /**
+   * Рум (топик) форум-чата, из которого пришло сообщение.
+   * Нужен для ссылки на первоисточник: t.me/<чат>/<рум>/<сообщение>.
+   */
+  sourceTopicId?: number | null;
   /** 'bot' по умолчанию — см. ListingOrigin и миграцию 0006_ingest.sql. */
   origin?: ListingOrigin;
 }

@@ -325,6 +325,72 @@
     }
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Журнал разбора: видно каждое сообщение и вердикт по нему            */
+  /* ------------------------------------------------------------------ */
+
+  function mk(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  /**
+   * Список «Что нашлось»: каждое сообщение, которое расширение прочитало,
+   * вердикт (объявление / отсеяно / дубль / старое), причина и ссылка на
+   * первоисточник — t.me/<чат>[/<рум>]/<сообщение>, чтобы открыть и переслать вручную.
+   */
+  function renderRecent(st) {
+    const box = $('recent');
+    if (!box) return;
+    box.replaceChildren();
+    const recs = (st && st.recent) || [];
+    if (!recs.length) {
+      box.append(mk('p', 'rec-empty',
+        'Список пуст: откройте в Telegram Web чат из белого списка и нажмите «Диагностика вкладки» — ' +
+        'расширение прочитает сообщения и покажет вердикт по каждому.'));
+      return;
+    }
+
+    const listings = recs.filter((r) => r.verdict === 'listing').length;
+    box.append(mk('div', 'rec-head',
+      `Что нашлось: ${listings} объявлений из ${recs.length} прочитанных`));
+
+    for (const rec of recs.slice(0, 20)) {
+      const row = mk('div', 'rec');
+      const top = mk('div', 'rec-top');
+      const badge = rec.verdict === 'listing'
+        ? mk('span', rec.sent ? 'badge sent' : 'badge ok', core.VERDICT_LABELS[rec.verdict] || '🟢 объявление')
+        : mk('span', 'badge', core.VERDICT_LABELS[rec.verdict] || rec.verdict || '—');
+      top.append(badge);
+      top.append(mk('span', 'rec-why', rec.sent ? 'отправлено на сервер' : core.explainReason(rec.reason)));
+      row.append(top);
+      // откуда сообщение: журнал переживает смену чата, чат и рум видны в каждой строке
+      row.append(mk('div', 'rec-why', (rec.chat || rec.chatId || '') + (rec.topicId ? ' · рум ' + rec.topicId : '')));
+      row.append(mk('div', 'rec-text', (rec.author ? rec.author + ': ' : '') + (rec.text || '')));
+      if (rec.link) {
+        const a = mk('a', null, rec.link.replace(/^https:\/\//, ''));
+        a.href = rec.link;
+        a.target = '_blank';
+        a.rel = 'noreferrer';
+        row.append(a);
+      } else {
+        row.append(mk('div', 'rec-why', 'ссылки нет: id сообщения не прочитался в разметке Telegram Web'));
+      }
+      box.append(row);
+    }
+  }
+
+  /** Спросить состояние вкладки и показать счётчики + журнал разбора (без внедрения). */
+  async function refreshState() {
+    const res = await notifyTab({ type: 'pk:state' });
+    if (!res || !res.state) { renderRecent(null); return; }
+    renderStats(res.state.counters || {});
+    renderRecent(res.state);
+    if (res.state.diagnostic && res.state.diagnostic.topicNote) show('warn', res.state.diagnostic.topicNote);
+  }
+
   async function diagnose() {
     const res = await notifyTab({ type: 'pk:diagnostic' });
     const box = $('diag');
@@ -332,7 +398,8 @@
     if (!res) { box.textContent = 'Вкладка Telegram Web не отвечает.'; return; }
     if (res.error) { show('warn', res.error); box.textContent = res.error; return; }
     box.textContent = res.diagnostic || JSON.stringify(res.state || {}, null, 2);
-    clearMsg();
+    renderRecent(res.state);
+    if (!(res.state && res.state.diagnostic && res.state.diagnostic.topicNote)) clearMsg();
   }
 
   async function sendNow() {
@@ -341,6 +408,7 @@
     if (res.error) { show('warn', res.error); return; }
     const c = (res.state && res.state.counters) || {};
     renderStats(c);
+    renderRecent(res.state);
     show(res.state && res.state.error ? 'err' : 'ok',
       (res.state && res.state.status) || 'отправлено');
   }
@@ -361,4 +429,6 @@
   $('reset').addEventListener('click', reset);
 
   load();
+  // журнал разбора подтягиваем из вкладки: попап открывается уже с тем, что нашлось
+  refreshState().catch(() => renderRecent(null));
 })();

@@ -30,6 +30,17 @@
     .msg.warn { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
     pre { white-space: pre-wrap; background: #0f172a; color: #e2e8f0; padding: 8px; border-radius: 8px; font-size: 11px; margin: 8px 0 0; }
     .note { margin-top: 10px; padding: 8px; border: 1px solid #e2e8f0; border-radius: 8px; color: #475569; font-size: 11.5px; }
+    .rec-head { margin-top: 12px; font-weight: 600; color: #475569; display: flex; justify-content: space-between; gap: 8px; }
+    .rec { border-top: 1px solid #f1f5f9; padding: 6px 0; }
+    .rec-top { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+    .badge { font-size: 11px; padding: 1px 6px; border-radius: 999px; border: 1px solid #e2e8f0; color: #475569; background: #f8fafc; white-space: nowrap; }
+    .badge.ok { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+    .badge.sent { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+    .rec-why { color: #94a3b8; font-size: 11px; }
+    .rec-text { color: #0f172a; margin-top: 2px; }
+    .rec a { color: #2563eb; font-size: 11px; text-decoration: none; word-break: break-all; }
+    .rec a:hover { text-decoration: underline; }
+    .rec-empty { color: #64748b; font-size: 12px; margin: 10px 0 0; }
     code { background: #f1f5f9; padding: 1px 4px; border-radius: 4px; }
   </style>
 </head>
@@ -45,11 +56,15 @@
     <label for="token">INGEST_TOKEN</label>
     <input id="token" type="password" placeholder="Bearer-токен для /api/ingest" autocomplete="off">
 
-    <label for="whitelist">Белый список чатов и румов (по строке: название или t.me/…)</label>
-    <textarea id="whitelist" placeholder="Водители Польша–Беларусь&#10;t.me/drivers_pl_by&#10;Граница :: Очередь BY-PL&#10;Граница :: 7"></textarea>
+    <label for="whitelist">Белый список чатов и румов (по строке: ссылка, название или t.me/…)</label>
+    <textarea id="whitelist" placeholder="https://t.me/travelersminsk/91529&#10;https://t.me/travelersminsk/91600&#10;t.me/granica_es&#10;Водители Польша–Беларусь&#10;Граница :: Очередь BY-PL"></textarea>
     <p style="margin:3px 0 0;color:#64748b;font-size:11.5px">
-      Запись с <code>::</code> ограничивает один рум (тему) форум-чата: названием или id.
-      Без <code>::</code> — весь чат, все румы. Тот же список можно править в панели сервера.
+      Рум (тему) форум-чата можно задать <b>просто ссылкой из Telegram</b>: скопируйте адрес рума
+      (<code>t.me/чат/91529</code>) или даже адрес сообщения в нём
+      (<code>t.me/чат/91529/713464</code> — первое число рум, второе сообщение) и вставьте строкой.
+      Равносильная запись — <code>чат :: название рума</code> или <code>чат :: 91529</code>.
+      Приватный чат — <code>t.me/c/1234567890</code> (и <code>…/91529</code> для его рума).
+      Строка без указания рума — весь чат со всеми румами. Тот же список можно править в панели сервера.
     </p>
 
     <div class="row">
@@ -88,7 +103,27 @@
     <div id="msg"></div>
 
     <div class="stats" id="stats"></div>
+    <div id="recent"></div>
     <pre id="diag" hidden></pre>
+
+    <div class="note">
+      <b>Как это работает.</b> Расширение читает <u>только тот чат, который сейчас открыт</u>
+      во вкладке Telegram Web — раз в «Опрос, с» секунд (по умолчанию 120) берёт последние
+      сообщения («Читать последних»), прогоняет их через детект объявлений и показывает вердикт
+      по каждому в списке «Что нашлось» ниже. Чаты оно само не перебирает и «отдыхать» не умеет:
+      хотите другой чат или рум — откройте его в Telegram, сбор подхватит на следующем проходе.
+      Уже отправленное не шлётся повторно (дедупликация по <code>чат + сообщение</code>),
+      всё найденное на сервере попадает в очередь модерации, ничего не публикуется автоматически.
+    </div>
+
+    <div class="note">
+      <b>Детект — по ключевым словам, не «на глаз».</b> В расширение вшит тот же парсер, что и на
+      сервере (<code>src/parser.ts</code>): он ищет признаки предложения или запроса передачи
+      («возьму», «везу», «могу передать», «есть место», «ищу», «нужно передать», «попутка»,
+      «посылка», «груз», «документы»…) плюс города, и отсеивает объявления только про пассажиров.
+      Сообщения без признаков объявления отсеиваются как «обычная переписка» — их тоже видно
+      в списке «Что нашлось», с причиной. Спорные случаи сервер позже допроверяет ИИ.
+    </div>
 
     <div class="note">
       <b>«Вкладка не отвечает»?</b> Нажмите <b>«Подключить к вкладке»</b> — попап сам внедрит

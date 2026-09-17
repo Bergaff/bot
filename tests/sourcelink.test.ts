@@ -48,6 +48,29 @@ describe('listingSourceLink', () => {
     expect(listingSourceLink('web:durov', 528, { 'web:durov': 'https://t.me/durov/100' })).toBe('https://t.me/durov/100');
   });
 
+  it('рум (топик) форум-чата: ссылка трёхчастная t.me/<чат>/<рум>/<сообщение>', () => {
+    // так Telegram ссылается на сообщение внутри темы форум-супергруппы
+    expect(listingSourceLink('web:travelersminsk', 713464, null, 91529))
+      .toBe('https://t.me/travelersminsk/91529/713464');
+    // приватный форум: служебная ссылка тоже с румом
+    expect(listingSourceLink('-1001234567890', 12, null, 7)).toBe('https://t.me/c/1234567890/7/12');
+    expect(listingSourceLink('ext:-1001234567890', 12, null, 7)).toBe('https://t.me/c/1234567890/7/12');
+    // рум без id сообщения — ссылка на сам рум
+    expect(listingSourceLink('web:travelersminsk', null, null, 91529)).toBe('https://t.me/travelersminsk/91529');
+    // ссылка, заданная админом, дополняется румом и сообщением
+    expect(listingSourceLink('web:durov', 528, { 'web:durov': 'https://t.me/durov_chat' }, 9))
+      .toBe('https://t.me/durov_chat/9/528');
+    // пригласительная ссылка рум и сообщение не принимает
+    expect(listingSourceLink('ext:-100123', 5, { 'ext:-100123': 'https://t.me/+AbCdEfGhIjK' }, 9))
+      .toBe('https://t.me/+AbCdEfGhIjK');
+    // обычная группа и личный чат: рум ссылки не даёт
+    expect(listingSourceLink('ext:-5551234', 12, null, 3)).toBeNull();
+    // мусор в topicId игнорируется
+    expect(listingSourceLink('web:durov', 528, null, 0)).toBe('https://t.me/durov/528');
+    expect(listingSourceLink('web:durov', 528, null, Number.NaN)).toBe('https://t.me/durov/528');
+    expect(listingSourceLink('web:durov', 528, null, -91529)).toBe('https://t.me/durov/528');
+  });
+
   it('пересылка от человека, обычная группа, пустые значения → null', () => {
     expect(listingSourceLink('fwd:123456', 601)).toBeNull();
     expect(listingSourceLink('-123456', 5)).toBeNull();
@@ -111,6 +134,18 @@ describe('formatListing: источник и признак origin не лома
     expect(card).toContain('<a href="https://t.me/drivers_pl_by/9001">исходное сообщение</a>');
     // один контакт — одна строка
     expect(card.match(/\+48579264254/g)).toHaveLength(1);
+  });
+
+  it('карточка из рума форум-чата: ссылка ведёт ровно на найденное сообщение', () => {
+    const card = formatListing(listing({
+      sourceChat: 'Travelers Minsk',
+      sourceChatId: 'web:travelersminsk',
+      sourceMessageId: 713464,
+      sourceTopicId: 91529,
+      origin: 'extension',
+    }));
+    expect(card).toContain('<a href="https://t.me/travelersminsk/91529/713464">исходное сообщение</a>');
+    expect(card).toContain('чат «Travelers Minsk»');
   });
 
   it('карточка из приватной супергруппы расширения: служебная ссылка и источник на месте', () => {

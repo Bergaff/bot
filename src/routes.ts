@@ -43,6 +43,8 @@ export interface IngestMessagePayload {
   text: string;
   chatTitle?: string | null;
   chatUrl?: string | null;
+  /** Рум (топик) форум-чата: нужен для ссылки t.me/<чат>/<рум>/<сообщение>. */
+  topicId?: number | null;
   date?: number | string | null;
   authorName?: string | null;
   authorUsername?: string | null;
@@ -148,11 +150,15 @@ export function validateIngestMessage(raw: unknown): {
   };
 
   const chatUrl = str(b.chatUrl, INGEST_LIMITS.maxChatUrl);
+  // Рум форум-чата: необязательное поле, принимаем целое > 0 (иначе игнорируем —
+  // битый topicId не должен ронять всё сообщение).
+  const topicRaw = b.topicId == null ? null : Number(b.topicId);
   return {
     value: {
       chatId,
       messageId,
       text: b.text,
+      topicId: topicRaw != null && Number.isInteger(topicRaw) && topicRaw > 0 ? topicRaw : null,
       chatTitle: str(b.chatTitle, INGEST_LIMITS.maxChatTitle),
       // ссылка на чат — только публичная t.me, иначе не сохраняем (как в PUT /api/admin/chat-links)
       chatUrl: chatUrl && /^https:\/\/t\.me\//.test(chatUrl) ? chatUrl : null,
@@ -260,6 +266,8 @@ export async function runIngestBatch(
         chatId: payload.chatId,
         chatTitle: payload.chatTitle ?? null,
         messageId: payload.messageId,
+        // рум форум-чата: без него ссылка на сообщение вела бы на весь чат
+        topicId: payload.topicId ?? null,
         chatUrl: payload.chatUrl,
         authorName: payload.authorName ?? null,
         authorUsername: payload.authorUsername ?? null,

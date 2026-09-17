@@ -48,6 +48,8 @@ export interface IngestSource {
   chatId: string;
   chatTitle: string | null;
   messageId: number | null;
+  /** Рум (топик) форум-чата — для ссылки t.me/<чат>/<рум>/<сообщение>. */
+  topicId?: number | null;
   /** Публичная ссылка на чат (t.me/<username>) — сохранится в chat_links. */
   chatUrl?: string | null;
   authorName?: string | null;
@@ -339,6 +341,7 @@ export async function ingestMessage(
       sourceChat: src.chatTitle ?? null,
       sourceChatId: src.chatId || null,
       sourceMessageId: messageId,
+      sourceTopicId: src.topicId ?? null,
       origin: src.origin,
     };
     // 6.0 Дубль по смыслу: водитель пишет «20 сентября Варшава — Минск» каждый день
@@ -470,6 +473,7 @@ export function extensionSource(msg: {
   messageId: number;
   chatTitle?: string | null;
   chatUrl?: string | null;
+  topicId?: number | null;
   authorName?: string | null;
   authorUsername?: string | null;
 }): IngestSource {
@@ -477,6 +481,7 @@ export function extensionSource(msg: {
     chatId: msg.chatId,
     chatTitle: msg.chatTitle ?? null,
     messageId: msg.messageId,
+    topicId: Number.isInteger(msg.topicId) && Number(msg.topicId) > 0 ? Number(msg.topicId) : null,
     chatUrl: msg.chatUrl ?? chatUrlOf(msg.chatId),
     authorName: msg.authorName ?? null,
     authorUsername: normalizeAt(msg.authorUsername ?? null),

@@ -21,6 +21,7 @@ function mapRow(row: Record<string, unknown>): Listing {
     sourceChat: row.source_chat ? String(row.source_chat) : null,
     sourceChatId: row.source_chat_id ? String(row.source_chat_id) : null,
     sourceMessageId: row.source_message_id ? Number(row.source_message_id) : null,
+    sourceTopicId: row.source_topic_id ? Number(row.source_topic_id) : null,
     origin: (row.origin as ListingOrigin | undefined) ?? 'bot',
     createdAt: String(row.created_at),
     publishedAt: row.published_at ? String(row.published_at) : null,
@@ -40,15 +41,15 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
     `INSERT INTO listings
       (id, type, from_city, to_city, departure_date, weight_kg, price, description,
        phone, telegram, status, source, source_chat, source_chat_id, source_message_id,
-       origin, created_at, published_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       source_topic_id, origin, created_at, published_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, input.type, input.fromCity, input.toCity,
       input.departureDate ?? null, input.weightKg ?? null, input.price ?? null,
       input.description, phone, telegram,
       input.status, input.source, input.sourceChat ?? null, input.sourceChatId ?? null,
-      input.sourceMessageId ?? null, input.origin ?? 'bot', now, publishedAt
+      input.sourceMessageId ?? null, input.sourceTopicId ?? null, input.origin ?? 'bot', now, publishedAt
     )
     .run();
   const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
@@ -933,7 +934,8 @@ export async function listIngestLog(env: Env, limit = 50): Promise<IngestLogRow[
     `SELECT s.chat_id AS chatId, s.message_id AS messageId, s.seen_at AS seenAt, s.listing_id AS listingId,
             l.status AS status, l.type AS type, l.from_city AS fromCity, l.to_city AS toCity,
             l.departure_date AS departureDate, l.origin AS origin,
-            l.source_chat_id AS lChatId, l.source_message_id AS lMessageId
+            l.source_chat_id AS lChatId, l.source_message_id AS lMessageId,
+            l.source_topic_id AS lTopicId
        FROM tg_seen s
        LEFT JOIN listings l ON l.id = s.listing_id
       ORDER BY s.seen_at DESC, s.message_id DESC
@@ -961,7 +963,9 @@ export async function listIngestLog(env: Env, limit = 50): Promise<IngestLogRow[
       toCity: typeof r.toCity === 'string' ? r.toCity : null,
       departureDate: typeof r.departureDate === 'string' ? r.departureDate : null,
       origin,
-      link: listingSourceLink(chatId, messageId, links),
+      // рум берём из заявки: у отсеянных сообщений ('none') его не знаем
+      link: listingSourceLink(chatId, messageId, links,
+        ownListing && r.lTopicId ? Number(r.lTopicId) : null),
     };
   });
 }

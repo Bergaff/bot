@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import { createApp } from '../src/server';
 import { INGEST_LIMITS, validateIngestBody, validateIngestMessage } from '../src/routes';
+import { listIngestLog } from '../src/store';
 import { createLocalEnv } from '../local/sqlite-env';
 import type { Env } from '../src/types';
 
@@ -72,6 +73,53 @@ describe('POST /api/ingest — контракт (ТЗ п. 4)', () => {
 
     // cursors — максимальный принятый messageId по каждому chatId
     expect(body.cursors).toEqual({ 'web:drivers_pl_by': 12347 });
+  });
+
+  it('topicId рума сохраняется и делает ссылку на сообщение трёхчастной', async () => {
+    const res = await post({
+      messages: [msg({
+        chatId: 'web:travelersminsk',
+        chatTitle: 'Travelers Minsk',
+        chatUrl: 'https://t.me/travelersminsk',
+        messageId: 713464,
+        topicId: 91529,
+      })],
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body.summary.created).toBe(1);
+
+    const row = (await env.DB.prepare(
+      'SELECT source_chat_id, source_message_id, source_topic_id FROM listings').first()) as Record<string, unknown>;
+    expect(row).toMatchObject({
+      source_chat_id: 'web:travelersminsk', source_message_id: 713464, source_topic_id: 91529,
+    });
+
+    // журнал принятых сообщений: ссылка ведёт в рум, а не на весь чат
+    const log = await listIngestLog(env, 5);
+    expect(log[0]).toMatchObject({
+      chatId: 'web:travelersminsk', messageId: 713464, kind: 'created',
+      link: 'https://t.me/travelersminsk/91529/713464',
+    });
+  });
+
+  it('без topicId ссылка остаётся двухчастной (обычный чат)', async () => {
+    await post({ messages: [msg()] });
+    const log = await listIngestLog(env, 5);
+    expect(log[0]!.link).toBe('https://t.me/drivers_pl_by/12345');
+    const row = (await env.DB.prepare('SELECT source_topic_id FROM listings').first()) as Record<string, unknown>;
+    expect(row.source_topic_id).toBeNull();
+  });
+
+  it('topicId в контракте необязателен: мусор игнорируется, сообщение принимается', () => {
+    expect(validateIngestMessage(msg({ topicId: 91529 })).value?.topicId).toBe(91529);
+    expect(validateIngestMessage(msg({ topicId: '91529' })).value?.topicId).toBe(91529);
+    expect(validateIngestMessage(msg({ topicId: 'abc' })).value?.topicId).toBeNull();
+    expect(validateIngestMessage(msg({ topicId: -3 })).value?.topicId).toBeNull();
+    expect(validateIngestMessage(msg({ topicId: 1.5 })).value?.topicId).toBeNull();
+    expect(validateIngestMessage(msg()).value?.topicId).toBeNull();
+    // битый topicId не делает сообщение невалидным
+    expect(validateIngestMessage(msg({ topicId: null })).error).toBeUndefined();
   });
 
   it('заявки всегда pending, origin=extension, уведомление не падает', async () => {

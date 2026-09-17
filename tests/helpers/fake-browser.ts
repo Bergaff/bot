@@ -181,6 +181,8 @@ export class FakeBrowser {
     settings?: Record<string, any>;
     counters?: Record<string, number>;
     sentKeys?: string[];
+    /** Журнал разбора: каждое прочитанное сообщение, вердикт и ссылка на него. */
+    recent?: Array<Record<string, any>>;
     clientId?: string;
     alive?: { at?: number; ok?: boolean; error?: string | null; version?: string; url?: string | null; status?: string };
   } {

@@ -17,6 +17,7 @@
 | `src/collect.ts` | `src/collect.ts` | ✂️ заменить `sendTextToAdmins` на ваш `sendText`/`notifyAdmins` (шаг 3) |
 | `src/routes.ts` | `src/routes.ts` | новый файл |
 | `migrations/0006_ingest.sql` | `migrations/0006_ingest.sql` | как есть |
+| `migrations/0007_source_topic.sql` | `migrations/0007_source_topic.sql` | как есть: колонка `listings.source_topic_id` (рум форум-чата) |
 | `src/store.ts` | ✂️ только дописать | в вашем `store.ts` уже всё есть — добавьте блок «Авто-сбор» из нашего файла и 3 точечные правки (шаг 2) |
 | `src/ai.ts` | ✂️ только дописать | добавить счётчики квот по каналам (шаг 2) |
 | `src/types.ts` | ✂️ только дописать | новые переменные `Env`, `ListingOrigin`, `origin` в `ListingInput` |
@@ -66,9 +67,17 @@ diff /tmp/parcel/src/util.ts   src/util.ts
 
 ## 1. Этап 1 — общий конвейер
 
-### 1.1 `migrations/0006_ingest.sql`
+### 1.1 `migrations/0006_ingest.sql` и `0007_source_topic.sql`
 
 Скопировать как есть: `ALTER TABLE listings ADD COLUMN origin TEXT NOT NULL DEFAULT 'bot'` (без `CHECK` — значения контролирует код) + `CREATE TABLE IF NOT EXISTS watch_chats (…)`. Применяется штатно: `npm run deploy`.
+
+`0007_source_topic.sql` — одна колонка: `ALTER TABLE listings ADD COLUMN source_topic_id INTEGER`
+(рум/топик форум-чата, из которого пришло сообщение). Без неё ссылка на сообщение в форум-чате
+не строится: Telegram ссылается на сообщение внутри темы как `t.me/<чат>/<рум>/<сообщение>`
+(служебная — `t.me/c/<id>/<рум>/<сообщение>`), а по двухчастной ссылке открывается весь чат и
+модератор не находит исходник, чтобы переслать его вручную. Номер 0007 свободен: в `parcel`
+последняя миграция — `0005_matches.sql`, наша `0006` добавлена этапом 1. У каналов и обычных
+чатов румов нет, колонка остаётся `NULL`.
 
 ### 1.2 `src/types.ts`
 
@@ -76,14 +85,16 @@ diff /tmp/parcel/src/util.ts   src/util.ts
 export type ListingOrigin = 'bot' | 'collector' | 'extension';
 ```
 
-- в `ListingInput` добавить `origin?: ListingOrigin;`
+- в `ListingInput` добавить `origin?: ListingOrigin;` и `sourceTopicId?: number | null;` (рум форум-чата, миграция 0007)
 - в `Listing` — `origin: ListingOrigin;`
 - в `Env` — переменные из `.dev.vars.example` этого репозитория (`INGEST_TOKEN`, `COLLECT_*`, `INGEST_MAX_AGE_DAYS`, `COLLECT_CRON`, `ARCHIVE_CRON`).
 
 ### 1.3 `src/store.ts`
 
-- `mapRow()`: `origin: (row.origin as ListingOrigin | undefined) ?? 'bot',`
-- `createListing()`: добавить колонку `origin` в `INSERT` и `input.origin ?? 'bot'` в `bind()`.
+- `mapRow()`: `origin: (row.origin as ListingOrigin | undefined) ?? 'bot',` и
+  `sourceTopicId: row.source_topic_id ? Number(row.source_topic_id) : null,`
+- `createListing()`: добавить колонки `origin`, `source_topic_id` в `INSERT` и
+  `input.origin ?? 'bot'`, `input.sourceTopicId ?? null` в `bind()`.
 - ✂️ **`listSourceChats()`** — ваше условие `source_chat_id LIKE '-%'` не пустит новые ключи на вкладку «чаты»:
 
 ```sql
@@ -196,8 +207,11 @@ MTProto/юзерботов нет, ТЗ п. 1.3 «не цели»). Панель
 Лимиты: у отметки свой ключ `ext-hb:<первые 8 символов токена>`, 600 в час — она не съедает
 бюджет приёма (60/ч), поэтому расширение может отмечаться каждый проход.
 Журнал читает `tg_seen` (миграция `0006_ingest.sql`, §1.1) с `LEFT JOIN listings`:
-для приватной супергруппы ссылка служебная `t.me/c/<id>/<msg>` — открывается у участников чата,
-её модератор и пересылает сам.
+для приватной супергруппы ссылка служебная `t.me/c/<id>[/<рум>]/<msg>` — открывается у
+участников чата, её модератор и пересылает сам. Рум берётся из `listings.source_topic_id`
+(`listIngestLog()` выбирает `l.source_topic_id AS lTopicId` и передаёт четвёртым аргументом
+в `listingSourceLink()`), поэтому у отсеянных сообщений (`kind: 'none'`, заявки нет) ссылка
+остаётся двухчастной — это осознанно: рум мы знаем только из созданной заявки.
 
 `wrangler.toml`:
 
@@ -317,24 +331,36 @@ L645 (была L610) — `adminCard()`. Правим **только вторую
 ```diff
  function sourceLinkUrl(l) {
    if (!l.sourceChatId) return null;
-   if (chatLinks[l.sourceChatId]) return chatLinks[l.sourceChatId];
+-  if (chatLinks[l.sourceChatId]) return chatLinks[l.sourceChatId];
++  // Рум (топик) форум-чата: ссылка на сообщение трёхчастная —
++  // t.me/<чат>/<рум>/<сообщение> (служебная — t.me/c/<id>/<рум>/<сообщение>).
++  const topic = l.sourceTopicId ? '/' + l.sourceTopicId : '';
++  const msg = l.sourceMessageId != null ? '/' + l.sourceMessageId : '';
++  // Ссылку, заданную админом, дополняем сообщением только если это t.me/<username>:
++  // пригласительные t.me/+AbC… и служебные t.me/c/<id> так не работают.
++  const manual = chatLinks[l.sourceChatId];
++  if (manual) {
++    return /^https:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]*$/.test(String(manual).replace(/\/$/, ''))
++      ? manual.replace(/\/$/, '') + topic + msg
++      : manual;
++  }
 +  // авто-сбор: web:<username> — публичный чат, открытая ссылка;
-+  // ext:-100<id> — приватная супергруппа из расширения, служебная t.me/c/<id>/<msg>
-+  // (открывается у участников чата — модератор может открыть и переслать сам);
 +  // остальные ext: (обычная группа, личный чат, ключ по заголовку) — ссылки нет
 +  const web = /^web:([A-Za-z][A-Za-z0-9_]{3,31})$/.exec(l.sourceChatId);
-+  if (web) return `https://t.me/${web[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
-+  const ext = /^ext:(-100\d+)$/.exec(l.sourceChatId);
-+  if (ext) return `https://t.me/c/${ext[1].slice(4)}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
++  if (web) return `https://t.me/${web[1]}${topic}${msg}`;
 +  if (l.sourceChatId.startsWith('ext:')) return null;
    const m = /^-100(\d+)$/.exec(l.sourceChatId);
    if (!m) return null;
-   return `https://t.me/c/${m[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
+-  return `https://t.me/c/${m[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
++  return `https://t.me/c/${m[1]}${topic}${msg}`;
  }
 ```
 
 Без этой правки подпись источника у собранных заявок остаётся некликабельной: существующий
-код понимает только id вида `-100…`, а расширение присылает `web:<username>` и `ext:<peer-id>`.
+код понимает только id вида `-100…`, а расширение присылает `web:<username>` и `ext:<peer-id>`
+(в том числе с румом — `sourceTopicId`, миграция 0007). Точный текст функции — в
+`parcel/demo/helpers.js` (демо-сервер склеивает её с `app-auto-collect.js`, тесты
+`tests/admin-ui.test.ts` прогоняют блок целиком).
 Тот же разбор живёт в нашем `src/links.ts` (`listingSourceLink`) — тесты `tests/sourcelink.test.ts`.
 
 Оговорка про служебную ссылку: она верна, только если расширение прочитало настоящий id
@@ -350,10 +376,11 @@ L645 (была L610) — `adminCard()`. Правим **только вторую
 
 - подключённые браузеры: на связи / нет связи, текущий чат и рум, счётчики
   (найдено · отправлено · заявок · дублей · отсеяно · прогонов · ошибок разметки), состояние и ошибки;
-- форма белого списка: по строке на чат, запись с `::` ограничивает один рум (название или id),
-  плюс интервал опроса и пауза — «сохранить и передать расширению»;
-- журнал принятого: когда, чат, **ссылка на сообщение**, чем оно стало (заявка создана / дубль /
-  обработано без заявки) и id карточки.
+- форма белого списка: по строке на чат, рум (топик) форум-чата задаётся **ссылкой из Telegram**
+  (`t.me/<чат>/<рум>`, годится и `t.me/<чат>/<рум>/<сообщение>`) или записью `чат :: рум`,
+  приватный чат — `t.me/c/<id>`; плюс интервал опроса и пауза — «сохранить и передать расширению»;
+- журнал принятого: когда, чат, **ссылка на сообщение** (в форум-чате — с румом), чем оно стало
+  (заявка создана / дубль / обработано без заявки) и id карточки.
 
 Нужны только ручки из §2.1 (они в тех же `registerIngestRoutes` / `registerAdminCollectRoutes`).
 
@@ -453,4 +480,7 @@ npm run db:local && npm run dev           # локальная D1 + воркер
 6. 61-й запрос за час → `429` с `Retry-After`.
 7. Preflight `OPTIONS` с `Origin: https://web.telegram.org` → `204` + заголовки CORS.
 8. Дневной лимит ИИ бота (`ai:day:*`) не изменился после прогона сборщика.
-9. `npm run deploy` применил миграцию 0006 без ручной правки базы.
+9. `npm run deploy` применил миграции 0006 и 0007 без ручной правки базы.
+10. Сообщение из рума форум-чата (`topicId` в батче) → в заявке `source_topic_id`, а ссылка
+    «исходное сообщение» в карточке модератора и в журнале приёма ведёт на
+    `t.me/<чат>/<рум>/<сообщение>`.

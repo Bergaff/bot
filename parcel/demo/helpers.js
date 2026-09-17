@@ -104,13 +104,24 @@ let chatLinks = {}; // публичные ссылки на чаты-источ�
    Без этой правки подпись источника у собранных заявок остаётся некликабельной. */
 function sourceLinkUrl(l) {
   if (!l.sourceChatId) return null;
-  if (chatLinks[l.sourceChatId]) return chatLinks[l.sourceChatId];
+  /* Рум (топик) форум-чата: ссылка на сообщение трёхчастная —
+     t.me/<чат>/<рум>/<сообщение> (служебная — t.me/c/<id>/<рум>/<сообщение>). */
+  const topic = l.sourceTopicId ? '/' + l.sourceTopicId : '';
+  const msg = l.sourceMessageId != null ? '/' + l.sourceMessageId : '';
+  /* Ссылку, заданную админом, дополняем сообщением только если это t.me/<username>:
+     пригласительные t.me/+AbC… и служебные t.me/c/<id> так не работают. */
+  const manual = chatLinks[l.sourceChatId];
+  if (manual) {
+    return /^https:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]*$/.test(String(manual).replace(/\/$/, ''))
+      ? manual.replace(/\/$/, '') + topic + msg
+      : manual;
+  }
   const web = /^web:([A-Za-z][A-Za-z0-9_]{3,31})$/.exec(l.sourceChatId);
-  if (web) return `https://t.me/${web[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
+  if (web) return `https://t.me/${web[1]}${topic}${msg}`;
   if (l.sourceChatId.startsWith('ext:')) return null;
   const m = /^-100(\d+)$/.exec(l.sourceChatId);
   if (!m) return null;
-  return `https://t.me/c/${m[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
+  return `https://t.me/c/${m[1]}${topic}${msg}`;
 }
 
 function sourceContent(l) {

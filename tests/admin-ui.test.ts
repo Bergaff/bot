@@ -383,6 +383,12 @@ describe('фильтр очереди по источнику заявки', () 
       .toBe('https://t.me/drivers_pl_by/1234');
     expect(ui.ctx.sourceLinkUrl({ sourceChatId: 'web:drivers_pl_by' })).toBe('https://t.me/drivers_pl_by');
     expect(ui.ctx.sourceLinkUrl({ sourceChatId: 'ext:-1001234567890', sourceMessageId: 7 })).toBeNull();
+    // рум (топик) форум-чата: ссылка трёхчастная, как её даёт Telegram
+    expect(ui.ctx.sourceLinkUrl({
+      sourceChatId: 'web:travelersminsk', sourceTopicId: 91529, sourceMessageId: 713464,
+    })).toBe('https://t.me/travelersminsk/91529/713464');
+    expect(ui.ctx.sourceLinkUrl({ sourceChatId: '-1001234567890', sourceTopicId: 7, sourceMessageId: 9 }))
+      .toBe('https://t.me/c/1234567890/7/9');
     expect(ui.ctx.sourceLinkUrl({ sourceChatId: '-1001234567890', sourceMessageId: 9 }))
       .toBe('https://t.me/c/1234567890/9');
     expect(ui.ctx.sourceLinkUrl({})).toBeNull();

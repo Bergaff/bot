@@ -42,7 +42,7 @@ const parts = [
 const header = `// ==UserScript==
 // @name         попутка. — сбор объявлений из чатов Telegram Web
 // @namespace    https://github.com/Bergaff/bot
-// @version      1.0.2
+// @version      1.0.3
 // @description  Только чтение: находит объявления о передаче посылок в открытой вкладке Telegram Web и отправляет их на сервер попутки (POST /api/ingest). Ничего не публикует от вашего имени.
 // @match        https://web.telegram.org/*
 // @run-at       document-idle
@@ -57,14 +57,20 @@ const header = `// ==UserScript==
  *   localStorage.setItem('poputchka', JSON.stringify({ settings: {
  *     serverUrl: 'https://pop-utka.app',
  *     token: 'ВАШ_INGEST_TOKEN',
- *     // запись с '::' ограничивает один рум (топик) форум-чата — названием или id
- *     whitelist: ['Водители Польша–Беларусь', 'Граница :: Очередь BY-PL', 'Граница :: 7'],
+ *     // рум (топик) форум-чата — просто ссылкой из Telegram или записью с '::'
+ *     whitelist: ['https://t.me/travelersminsk/91529', 't.me/granica_es',
+ *                 'Граница :: Очередь BY-PL', 'Граница :: 7'],
  *     intervalSec: 120, batchSize: 20, maxPerChat: 30,
  *     confirmMode: true, paused: false, maxAgeHours: 72, requireContact: false,
  *   }}));
  *   location.reload();
  *
  * Счётчики и лог отправленного живут там же; панель — справа внизу вкладки.
+ *
+ * Версия 1.0.3: рум (топик) forum-чата можно задать ссылкой из Telegram
+ * (t.me/<чат>/<рум> или t.me/<чат>/<рум>/<сообщение>); в панели справа внизу и в
+ * попапе видно каждое прочитанное сообщение с вердиктом и ссылкой-пермалинком
+ * t.me/<чат>/<рум>/<сообщение> — её можно открыть и переслать объявление вручную.
  *
  * Версия 1.0.2: ядро и DOM-модуль называются core.js и dom.js — Chrome определяет
  * тип файла контент-скрипта по расширению и не грузил .cjs («Invalid script mime

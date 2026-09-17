@@ -28,7 +28,7 @@ export function formatListing(l: Listing, sourceNote = ''): string {
   parts.push(`Описание: ${escapeHtml(l.description.slice(0, 300))}`);
   const contacts = uniqueContacts(l.telegram, l.phone);
   if (contacts.length) parts.push(`Контакты: ${escapeHtml(contacts.join(', '))}`);
-  const srcLink = listingSourceLink(l.sourceChatId, l.sourceMessageId);
+  const srcLink = listingSourceLink(l.sourceChatId, l.sourceMessageId, null, l.sourceTopicId);
   const srcRef = l.sourceChat
     ? (l.sourceChat.startsWith('Переслано от ') ? escapeHtml(l.sourceChat) : `чат «${escapeHtml(l.sourceChat)}»`)
     : '';

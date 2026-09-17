@@ -36,7 +36,7 @@
   /* Слушатель сообщений регистрируется ПЕРВЫМ делом: даже если что-то ниже
    * упадёт, попап получит ответ с текстом ошибки, а не «вкладка не отвечает». */
   const boot = {
-    version: '1.0.2',
+    version: '1.0.3',
     startedAt: Date.now(),
     ok: false,
     error: null,
@@ -69,6 +69,8 @@
     counters: {},
     sentKeys: [],
     pending: [],          // найдено, но ждёт подтверждения (confirmMode)
+    recent: [],           // журнал разбора: КАЖДОЕ просмотренное сообщение и вердикт
+    ui: { showRecent: true },
     error: null,
     status: 'инициализация…',
     attempt: 0,
@@ -78,6 +80,7 @@
     unreadable: false,
     clientId: null,       // метка этого браузера для панели (heartbeat)
     lastChat: null,       // какой чат/рум видели последним
+    topicNote: null,      // если id рума пришлось взять из белого списка
     configFromServer: false,
     configError: null,
   };
@@ -130,6 +133,7 @@
     state.settings = core.withDefaults(saved.settings);
     state.counters = saved.counters || {};
     state.sentKeys = Array.isArray(saved.sentKeys) ? saved.sentKeys : [];
+    state.recent = Array.isArray(saved.recent) ? saved.recent : [];
     state.clientId = saved.clientId || newClientId();
   }
 
@@ -146,6 +150,8 @@
       settings: state.settings,
       counters: state.counters,
       sentKeys: core.pruneSentLog(state.sentKeys),
+      // журнал разбора храним урезанным: он для наглядности, а не для истории
+      recent: state.recent.slice(0, 40),
       clientId: state.clientId,
       // отметка «я жив» — по ней попап объясняет «вкладка не отвечает»
       alive: {
@@ -224,6 +230,7 @@
           listings: sum.listings, runs: 1, lastRunAt: new Date().toISOString(),
         });
         for (const key of sum.sentKeys) if (!state.sentKeys.includes(key)) state.sentKeys.push(key);
+        markSent(batch);
         state.sentKeys = core.pruneSentLog(state.sentKeys);
         state.status = `отправлено ${batch.length}, заявок ${sum.created}, дублей ${sum.duplicate}`;
       } catch (e) {
@@ -245,6 +252,51 @@
   }
 
   /* ---------------------------------------------------------------- */
+  /* Журнал разбора: видно каждое сообщение, которое посмотрело расширение
+  /* ---------------------------------------------------------------- */
+
+  /** Сколько записей журнала держать (новые вытесняют старые). */
+  const RECENT_MAX = 60;
+
+  /**
+   * Записать вердикт по одному сообщению. Пользователь должен видеть не только
+   * «найдено N», но и КАЖДОЕ сообщение, которое расширение прочитало и отвергло,
+   * с причиной и ссылкой на первоисточник (чтобы открыть и переслать вручную).
+   */
+  function rememberExamined(m, verdict, reason) {
+    const rec = {
+      at: new Date().toISOString(),
+      chatId: m.chatId,
+      messageId: m.messageId,
+      // чат и рум пишем в каждую запись: журнал переживает смену чата, и должно быть
+      // видно, откуда сообщение (пользователь открывает чаты руками)
+      chat: m.chatTitle || m.chatId || '',
+      topicId: m.topicId || null,
+      // юзернейм из DOM уже приходит с «@» — второй не добавляем
+      author: m.authorName ||
+        (m.authorUsername ? '@' + String(m.authorUsername).replace(/^@+/, '') : ''),
+      text: String(m.text || '').replace(/\s+/g, ' ').slice(0, 140),
+      verdict,
+      reason: reason || null,
+      // ссылка t.me/<чат>[/<рум>]/<сообщение>; null, если id сообщения синтетический
+      link: m.link || null,
+      sent: false,
+    };
+    const same = (r) => r.chatId === rec.chatId && r.messageId === rec.messageId;
+    state.recent = [rec].concat(state.recent.filter((r) => !same(r)));
+    if (state.recent.length > RECENT_MAX) state.recent = state.recent.slice(0, RECENT_MAX);
+    return rec;
+  }
+
+  /** Отметить в журнале, какие сообщения ушли на сервер. */
+  function markSent(batch) {
+    const keys = new Set((batch || []).map((m) => core.sentKey(m.chatId, m.messageId)));
+    for (const rec of state.recent) {
+      if (keys.has(core.sentKey(rec.chatId, rec.messageId))) rec.sent = true;
+    }
+  }
+
+  /* ---------------------------------------------------------------- */
   /* Один проход чтения                                                */
   /* ---------------------------------------------------------------- */
 
@@ -263,6 +315,14 @@
     }
 
     const chat = dom.readChatInfo(document, window.location);
+    // форум-чат: если клиент не отдал id рума в адресе, а белый список закрепляет
+    // за этим чатом ровно один рум — берём его и честно пишем об этом в статусе
+    const adoptedTopic = core.adoptTopicFromWhitelist(chat, state.settings.whitelist);
+    if (adoptedTopic) {
+      chat.topicId = adoptedTopic.topicId;
+      chat.topicIdSource = 'whitelist';
+    }
+    state.topicNote = adoptedTopic ? adoptedTopic.note : null;
     const chatKey = core.chatKeyOf(chat);
     const whitelisted = core.matchesWhitelist(chat, state.settings.whitelist);
     state.lastChat = {
@@ -309,24 +369,45 @@
     for (const raw of harvested.messages) {
       const m = core.toPayloadMessage(Object.assign({}, raw, { chat: Object.assign({ chatId: chatKey }, chat) }), state.settings);
       const verdict = core.detect(m.text, parser, state.settings);
-      if (!verdict.send) { reasons[verdict.reason] = (reasons[verdict.reason] || 0) + 1; continue; }
-      if (!core.withinAge(m.dateMs, state.settings.maxAgeHours, Date.now())) { reasons.old = (reasons.old || 0) + 1; continue; }
-      if (state.sentKeys.includes(core.sentKey(m.chatId, m.messageId))) { alreadySent++; continue; }
-      if (state.pending.some((p) => p.chatId === m.chatId && p.messageId === m.messageId)) { alreadySent++; continue; }
+      if (!verdict.send) {
+        reasons[verdict.reason] = (reasons[verdict.reason] || 0) + 1;
+        rememberExamined(m, 'rejected', verdict.reason);
+        continue;
+      }
+      if (!core.withinAge(m.dateMs, state.settings.maxAgeHours, Date.now())) {
+        reasons.old = (reasons.old || 0) + 1;
+        rememberExamined(m, 'old', 'old');
+        continue;
+      }
+      if (state.sentKeys.includes(core.sentKey(m.chatId, m.messageId))) {
+        alreadySent++;
+        rememberExamined(m, 'duplicate', 'duplicate');
+        continue;
+      }
+      if (state.pending.some((p) => p.chatId === m.chatId && p.messageId === m.messageId)) {
+        alreadySent++;
+        rememberExamined(m, 'duplicate', 'duplicate');
+        continue;
+      }
       candidates.push(m);
+      rememberExamined(m, 'listing', verdict.reason);
     }
 
     const fresh = core.filterUnsent(candidates, state.sentKeys);
     state.counters = core.mergeCounters(state.counters, { found: harvested.messages.length });
     state.lastDiagnostic = {
       url: location.href, chat, chatKey, whitelisted: true,
+      topicNote: state.topicNote,
       total: harvested.messages.length, strategy: harvested.strategy,
       toSend: fresh.length, alreadySent, filtered: harvested.messages.length - fresh.length - alreadySent,
       reasons, counts: harvested.counts,
+      // последние разобранные сообщения с вердиктами и ссылками (для диагностики и панели)
+      recent: state.recent.slice(0, 12),
     };
 
     if (!fresh.length) {
-      state.status = `чат «${chat.title}»: прочитано ${harvested.messages.length}, нового нет`;
+      state.status = `чат «${chat.title}»${chat.topicId != null ? ', рум ' + chat.topicId : ''}: ` +
+        `прочитано ${harvested.messages.length}, нового нет`;
       await persist();
       render();
       await postHeartbeat();
@@ -411,6 +492,7 @@
           status: state.status,
           error: state.error,
           pending: state.pending.length,
+      recent: state.recent.slice(0, 40),
           unreadable: state.unreadable,
           whitelist: state.settings.whitelist,
           intervalSec: state.settings.intervalSec,
@@ -453,6 +535,16 @@
     '.pk-item label{flex:1;display:flex;gap:6px;align-items:flex-start}',
     '.pk-item small{color:#64748b;display:block}',
     '.pk-btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}',
+    '.pk-sec{display:flex;justify-content:space-between;gap:8px;margin-top:10px;cursor:pointer;color:#475569;font-weight:600}',
+    '.pk-rec{border-top:1px solid #f1f5f9;padding:5px 0}',
+    '.pk-rec-top{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}',
+    '.pk-badge{font-size:11px;padding:1px 6px;border-radius:999px;border:1px solid #e2e8f0;color:#475569;background:#f8fafc;white-space:nowrap}',
+    '.pk-badge.ok{background:#f0fdf4;border-color:#bbf7d0;color:#166534}',
+    '.pk-badge.sent{background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8}',
+    '.pk-rec-text{color:#0f172a}',
+    '.pk-rec-meta{color:#94a3b8;font-size:11px}',
+    '.pk-rec a{color:#2563eb;text-decoration:none;font-size:11px}',
+    '.pk-rec a:hover{text-decoration:underline}',
     '#pk-panel.pk-collapsed #pk-body{display:none}',
   ].join('\n');
 
@@ -503,6 +595,7 @@
       state.error
         ? el('div', { class: state.unreadable ? 'pk-warn' : 'pk-err', text: state.error })
         : (c.created ? el('div', { class: 'pk-ok', text: 'Последние заявки ушли в очередь модерации.' }) : null),
+      state.topicNote ? el('div', { class: 'pk-warn', text: state.topicNote }) : null,
     ]);
 
     if (state.pending.length) {
@@ -514,8 +607,41 @@
             el('span', {}, [
               el('span', { text: m.text.replace(/\s+/g, ' ').slice(0, 110) + (m.text.length > 110 ? '…' : '') }),
               el('small', { text: m.chatId + ' · #' + m.messageId + (m.idSource === 'synthetic' ? ' · id синтетический' : '') }),
+              m.link ? el('a', { href: m.link, target: '_blank', rel: 'noreferrer', style: 'color:#2563eb;font-size:11px', text: m.link.replace(/^https:\/\//, '') }) : null,
             ]),
           ]),
+        ]));
+      }
+    }
+
+    // Журнал разбора: видно каждое сообщение, которое расширение прочитало,
+    // вердикт, причину и ссылку на первоисточник (чтобы открыть и переслать).
+    body.append(el('div', {
+      class: 'pk-sec',
+      onclick: () => { state.ui.showRecent = !state.ui.showRecent; render(); },
+    }, [
+      el('span', { text: 'Что нашлось (' + state.recent.length + ')' }),
+      el('span', { class: 'pk-muted', text: state.ui.showRecent ? 'скрыть' : 'показать' }),
+    ]));
+    if (state.ui.showRecent) {
+      if (!state.recent.length) {
+        body.append(el('div', { class: 'pk-muted', style: 'padding:4px 0', text: 'Пока ни одного сообщения не разобрали. Откройте чат из белого списка и дождитесь прохода.' }));
+      }
+      for (const rec of state.recent.slice(0, 12)) {
+        const badgeClass = rec.verdict === 'listing' ? (rec.sent ? 'pk-badge sent' : 'pk-badge ok') : 'pk-badge';
+        body.append(el('div', { class: 'pk-rec' }, [
+          el('div', { class: 'pk-rec-top' }, [
+            el('span', { class: badgeClass, text: core.VERDICT_LABELS[rec.verdict] || rec.verdict }),
+            el('span', { class: 'pk-rec-meta', text: rec.sent ? 'отправлено на сервер' : (rec.reason ? core.explainReason(rec.reason) : '') }),
+          ]),
+          el('div', {
+            class: 'pk-rec-meta',
+            text: (rec.chat || rec.chatId || '') + (rec.topicId ? ' · рум ' + rec.topicId : ''),
+          }),
+          el('div', { class: 'pk-rec-text', text: (rec.author ? rec.author + ': ' : '') + rec.text }),
+          rec.link
+            ? el('a', { href: rec.link, target: '_blank', rel: 'noreferrer', text: rec.link.replace(/^https:\/\//, '') })
+            : el('div', { class: 'pk-rec-meta', text: 'ссылки нет: id сообщения не прочитался в разметке' }),
         ]));
       }
     }

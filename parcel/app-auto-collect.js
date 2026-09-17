@@ -404,7 +404,7 @@ function extClientsList(clients) {
 function extConfigForm(config) {
   const list = el('textarea', {
     class: 'q', rows: 5,
-    placeholder: 'Граница\nt.me/granica_es\nГраница :: Очередь BY-PL\nГраница :: 7',
+    placeholder: 'https://t.me/travelersminsk/91529\nt.me/granica_es\nГраница\nГраница :: Очередь BY-PL\nГраница :: 7',
   });
   list.value = ((config && config.whitelist) || []).join('\n');
 
@@ -448,8 +448,11 @@ function extConfigForm(config) {
   return el('div', {}, [
     el('p', {
       class: 'muted',
-      text: 'Белый список расширения (по строке на чат). Запись с «::» ограничивает один рум (тему) ' +
-        'форум-чата — названием или id; без «::» читаются все румы чата. Пустой список — не читается ничего.',
+      text: 'Белый список расширения (по строке на чат). Рум (тему) форум-чата можно задать просто ' +
+        'ссылкой из Telegram — t.me/чат/91529 (или даже t.me/чат/91529/713464, ссылкой на сообщение в руме); ' +
+        'равносильная запись — «чат :: название рума» или «чат :: 91529». Приватный чат — t.me/c/1234567890 ' +
+        '(и t.me/c/1234567890/91529 для его рума). Строка без указания рума — весь чат со всеми румами. ' +
+        'Пустой список — не читается ничего.',
     }),
     el('div', { class: 'admin-card-actions' }, [
       list,

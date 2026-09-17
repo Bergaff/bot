@@ -158,14 +158,46 @@
     if (!base) return null;
     const topicPart = (parts[1] || '').trim();
     if (!topicPart) return base;
-    if (/^\d{1,12}$/.test(topicPart)) return Object.assign(base, { topicId: Number(topicPart), topic: null });
-    return Object.assign(base, { topic: squashTitle(topicPart), topicId: null });
+    if (/^\d{1,12}$/.test(topicPart)) {
+      return Object.assign(base, { topicId: Number(topicPart), topic: null, topicStrict: true });
+    }
+    return Object.assign(base, { topic: squashTitle(topicPart), topicId: null, topicStrict: true });
   }
 
+  /**
+   * Запись белого списка → { kind, value, topicId?, topic?, topicStrict? }.
+   *
+   * Рум (топик) форум-чата можно задать тремя способами:
+   *   «Граница :: Очередь BY-PL» / «Граница :: 7»  — явно;
+   *   «t.me/travelersminsk/91529»                  — ссылкой на рум (как её даёт Telegram);
+   *   «t.me/travelersminsk/91529/713464»           — ссылкой на сообщение в руме:
+   *                                                первое число — рум, второе — сообщение;
+   *   «t.me/c/1234567890/91529»                    — то же для приватной супергруппы.
+   */
   function normalizeChatPart(value) {
     if (!value) return null;
-    const link = /t\.me\/(?:s\/)?@?([A-Za-z][A-Za-z0-9_]{3,31})/i.exec(value);
-    if (link) return { kind: 'username', value: link[1].toLowerCase() };
+
+    // приватная супергруппа/канал: t.me/c/<id>[/<рум>[/<сообщение>]]
+    const priv = /t\.me\/c\/(\d{4,})(?:\/(\d{1,12}))?(?:\/(\d{1,12}))?/i.exec(value);
+    if (priv) {
+      const entry = { kind: 'peer', value: '-100' + priv[1] };
+      if (priv[2]) { entry.topicId = Number(priv[2]); entry.topicStrict = true; }
+      return entry;
+    }
+
+    // публичный чат: t.me/<username>[/<рум>[/<сообщение>]]
+    const link = /t\.me\/(?:s\/)?@?([A-Za-z][A-Za-z0-9_]{3,31})(?:\/(\d{1,12}))?(?:\/(\d{1,12}))?/i.exec(value);
+    if (link) {
+      const entry = { kind: 'username', value: link[1].toLowerCase() };
+      if (link[2]) {
+        entry.topicId = Number(link[2]);
+        // три сегмента — точно рум + сообщение; два — может быть и ссылкой на сообщение
+        // в обычном чате, поэтому такую запись смягчаем (см. matchesWhitelist)
+        entry.topicStrict = Boolean(link[3]);
+      }
+      return entry;
+    }
+
     const at = /^@([A-Za-z][A-Za-z0-9_]{3,31})$/.exec(value);
     if (at) return { kind: 'username', value: at[1].toLowerCase() };
     return { kind: 'title', value: squashTitle(value) };
@@ -201,15 +233,22 @@
     if (entries.length === 0) return false;
     const titles = chatTitleCandidates(chat);
     const username = String((chat && chat.username) || '').toLowerCase();
+    const peer = normalizePeerId(chat && chat.id);
+    const peerId = peer ? peer.id : null;
     const topics = topicCandidates(chat);
     const topicId = chat && chat.topicId != null && chat.topicId !== '' ? Number(chat.topicId) : null;
+    // форум ли открыт: знаем id рума или видим имя темы
+    const looksLikeForum = topicId != null || topics.length > 0;
 
     for (const e of entries) {
-      if (!chatPartMatches(e, titles, username)) continue;
-      // запись без «:: тема» — берём весь чат, все румы
+      if (!chatPartMatches(e, titles, username, peerId)) continue;
+      // запись без указания рума — берём весь чат, все румы
       if (e.topic == null && e.topicId == null) return true;
       if (e.topicId != null && topicId === e.topicId) return true;
       if (e.topic && topics.some((t) => t === e.topic || t.includes(e.topic) || e.topic.includes(t))) return true;
+      // Ссылка t.me/<username>/<число> в чате, который не похож на форум, — это, скорее всего,
+      // ссылка на сообщение, а не на рум. Читаем весь чат: иначе сбор молча встанет навсегда.
+      if (e.topicId != null && e.topicStrict === false && !looksLikeForum) return true;
       // чат совпал, но рум задан и не совпал/не прочитался — не читаем (ТЗ: только белый список)
     }
     return false;
@@ -236,7 +275,11 @@
     return out;
   }
 
-  function chatPartMatches(entry, titles, username) {
+  function chatPartMatches(entry, titles, username, peerId) {
+    // запись ссылкой на приватный чат (t.me/c/<id>): сравниваем внутренние id
+    if (entry.kind === 'peer') {
+      return Boolean(peerId) && String(peerId) === String(entry.value);
+    }
     if (entry.kind === 'username') {
       return Boolean(username && username === entry.value) ||
         // в названии чата иногда пишут юзернейм — считаем совпадением
@@ -249,19 +292,55 @@
    * Почему чат не подошёл белому списку — для диагностики (на логику не влияет).
    * Отличает «чат не в списке» от «чат тот, но рум не совпал или не прочитался».
    */
+  /**
+   * Запасной вариант для форум-чатов.
+   *
+   * Бывает, что Telegram Web показывает заголовок открытого рума, но числовой
+   * id рума в URL не отдаёт. Тогда запись вида `t.me/<чат>/<рум>` не с чем
+   * сравнить, и сбор молча встал бы. Если в белом списке за этим чатом закреплён
+   * РОВНО ОДИН рум — берём его id (и обязательно сообщаем об этом пользователю:
+   * вызывающий печатает `note`).
+   *
+   * Возвращает { topicId, note } или null, если угадывать нельзя:
+   * нет признаков открытого рума, румов закреплено несколько или ни одного.
+   */
+  function adoptTopicFromWhitelist(chat, whitelist) {
+    if (!chat) return null;
+    if (chat.topicId != null && chat.topicId !== '') return null;   // id и так прочитался
+    if (topicCandidates(chat).length === 0) return null;            // не видно, что открыт рум
+
+    const entries = normalizeWhitelist(whitelist);
+    const titles = chatTitleCandidates(chat);
+    const username = String(chat.username || '').toLowerCase();
+    const peer = normalizePeerId(chat.id);
+    const pinned = entries.filter((e) =>
+      e.topicId != null && chatPartMatches(e, titles, username, peer ? peer.id : null));
+    const ids = pinned.map((e) => e.topicId).filter((v, i, arr) => arr.indexOf(v) === i);
+    if (ids.length !== 1) return null;                              // неоднозначно — не угадываем
+
+    const room = topicCandidates(chat)[0];
+    return {
+      topicId: ids[0],
+      note: 'id рума взят из ссылки в белом списке (клиент не отдал его в адресе). ' +
+        'Проверьте, что открыт рум «' + (room || '?') + '».',
+    };
+  }
+
   function whitelistMismatch(chat, whitelist) {
     const entries = normalizeWhitelist(whitelist);
     if (entries.length === 0) return 'Белый список пуст — сообщения не читаются вовсе.';
     if (matchesWhitelist(chat, whitelist)) return null;
     const titles = chatTitleCandidates(chat);
     const username = String((chat && chat.username) || '').toLowerCase();
-    const sameChat = entries.filter((e) => chatPartMatches(e, titles, username));
+    const peer = normalizePeerId(chat && chat.id);
+    const sameChat = entries.filter((e) => chatPartMatches(e, titles, username, peer ? peer.id : null));
     if (sameChat.length === 0) return 'Чат не в белом списке.';
     const topics = topicCandidates(chat);
     const hasTopicId = Boolean(chat && chat.topicId != null && chat.topicId !== '');
     if (topics.length === 0 && !hasTopicId) {
-      return 'Чат в белом списке с указанием рума, но тема (рум) в DOM не прочиталась — сообщения не читаются. ' +
-        'Уберите «:: тема» из записи, если нужны все румы этого чата.';
+      return 'Чат в белом списке с указанием рума, но тема (рум) не прочиталась — сообщения не читаются. ' +
+        'Откройте конкретный рум в Telegram Web (список тем румом не считается) ' +
+        'или уберите указание рума из записи, если нужны все румы этого чата.';
     }
     return 'Чат в белом списке, но рум не совпал: открыт «' +
       (topics[0] || ('id ' + chat.topicId)) + '», а в списке «' +
@@ -439,6 +518,8 @@
         };
         if (m.chatTitle) out.chatTitle = m.chatTitle;
         if (m.chatUrl) out.chatUrl = m.chatUrl;
+        // рум форум-чата: нужен серверу для ссылки t.me/<username>/<рум>/<сообщение>
+        if (m.topicId) out.topicId = m.topicId;
         if (m.date) out.date = m.date;
         if (m.authorName) out.authorName = m.authorName;
         if (m.authorUsername) out.authorUsername = m.authorUsername;
@@ -453,12 +534,16 @@
     const chatId = chat.chatId || chatKeyOf(chat);
     const text = String(raw.text || '').trim();
     const dateMs = raw.dateMs || null;
-    const messageId = Number.isInteger(raw.messageId) && raw.messageId > 0
-      ? raw.messageId
-      : syntheticMessageId(chatId, text, dateMs);
+    const fromDom = Number.isInteger(raw.messageId) && raw.messageId > 0;
+    const messageId = fromDom ? raw.messageId : syntheticMessageId(chatId, text, dateMs);
+    const topicId = chat.topicId != null && chat.topicId !== '' ? Number(chat.topicId) : null;
     return {
       chatId,
       messageId,
+      // рум (топик) форум-чата: сервер строит по нему правильную ссылку на сообщение
+      topicId: Number.isInteger(topicId) && topicId > 0 ? topicId : null,
+      // ссылка на само сообщение — для панели расширения и попапа (в контракт не уходит)
+      link: messageLink(chat, messageId, { idSource: fromDom ? 'dom' : 'synthetic' }),
       text: text.slice(0, 4000),
       chatTitle: chat.title ? String(chat.title).slice(0, 120) : null,
       // публичная ссылка — только когда знаем юзернейм (приватные не публикуем)
@@ -468,8 +553,39 @@
       authorName: raw.authorName ? String(raw.authorName).slice(0, 120) : null,
       authorUsername: raw.authorUsername ? String(raw.authorUsername).slice(0, 64) : null,
       dateMs,
-      idSource: Number.isInteger(raw.messageId) && raw.messageId > 0 ? 'dom' : 'synthetic',
+      idSource: fromDom ? 'dom' : 'synthetic',
     };
+  }
+
+  /**
+   * Ссылка на сообщение — чтобы открыть его в Telegram и переслать вручную.
+   *
+   * Формат Telegram:
+   *   публичный чат            t.me/<username>[/<рум>]/<id сообщения>
+   *   приватная супергруппа    t.me/c/<id без -100>[/<рум>]/<id сообщения>
+   *
+   * Для обычной группы и личного чата ссылок на сообщение не существует — null.
+   * Синтетический id (DOM не отдал настоящий) ссылкой не снабжаем: она вела бы
+   * на случайное сообщение, а не на найденное.
+   */
+  function messageLink(chat, messageId, opts) {
+    const o = opts || {};
+    const id = Number(messageId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    if (o.synthetic === true || o.idSource === 'synthetic') return null;
+
+    const c = chat || {};
+    const topicRaw = c.topicId != null && c.topicId !== '' ? Number(c.topicId) : null;
+    const topicPart = topicRaw && Number.isInteger(topicRaw) && topicRaw > 0 ? '/' + topicRaw : '';
+
+    const username = c.username ? String(c.username).replace(/^@/, '') : null;
+    if (username) return 'https://t.me/' + username + topicPart + '/' + id;
+
+    const peer = normalizePeerId(c.id);
+    if (peer && /^-100\d+$/.test(peer.id)) {
+      return 'https://t.me/c/' + peer.id.slice(4) + topicPart + '/' + id;
+    }
+    return null;
   }
 
   /** Счётчики по ответу сервера: что добавляем в локальный лог и в статистику. */
@@ -551,6 +667,47 @@
   /* ---------------------------------------------------------------- */
 
   /** Короткий отчёт «что вижу в вкладке» — для попапа и отладки разметки. */
+  /** Как подписать вердикт по сообщению в панели и в диагностике. */
+  const VERDICT_LABELS = {
+    listing: '🟢 объявление',
+    rejected: '⚪ отсеяно',
+    duplicate: '🔁 уже отправляли',
+    old: '🕑 старое',
+    sent: '✅ ушло на сервер',
+  };
+
+  /** Почему детект решил именно так (reason из detect()). */
+  const REASON_LABELS = {
+    ok: 'есть признаки объявления',
+    short: 'короче 10 символов',
+    too_long: 'длиннее 4000 символов',
+    passenger: 'про поездку людей, без посылок',
+    chatter: 'нет признаков объявления (обычная переписка)',
+    no_contact: 'нет контакта для связи',
+    old: 'старше окна сбора',
+    duplicate: 'уже отправляли это сообщение',
+  };
+
+  function explainReason(reason) {
+    if (!reason) return '';
+    return REASON_LABELS[reason] || reason;
+  }
+
+  /**
+   * Одна строка журнала разбора — «что расширение увидело и что решило».
+   * `rec` — запись из state.recent контент-скрипта (см. rememberExamined).
+   */
+  function verdictLine(rec) {
+    const r = rec || {};
+    const label = VERDICT_LABELS[r.verdict] || r.verdict || '—';
+    const who = r.author ? r.author + ': ' : '';
+    const text = '"' + String(r.text || '') + '"';
+    const why = r.reason ? ' — ' + explainReason(r.reason) : '';
+    const link = r.link ? ' → ' + r.link : ' (ссылки нет: id сообщения не прочитался)';
+    const sent = r.sent ? ' ✅ отправлено' : '';
+    return label + ' · ' + who + text + why + sent + '\n    ' + link;
+  }
+
   function diagnostic(report) {
     const r = report || {};
     const lines = [];
@@ -560,7 +717,8 @@
       ' → chatId ' + (r.chatKey || '—'));
     if (r.chat && (r.chat.topicTitle || r.chat.topicId != null)) {
       lines.push('Рум (тема): ' + (r.chat.topicTitle || '—') +
-        (r.chat.topicId != null ? ' (id ' + r.chat.topicId + ')' : ''));
+        (r.chat.topicId != null ? ' (id ' + r.chat.topicId + ')' : '') +
+        (r.chat.topicIdSource === 'whitelist' ? ' — id из белого списка' : ''));
     }
     if (r.chat && r.chat.groupTitle) lines.push('Группа: ' + r.chat.groupTitle);
     lines.push('В белом списке: ' + (r.whitelisted ? 'да' : 'нет') +
@@ -573,6 +731,14 @@
       if (parts.length) lines.push('Причины отсева: ' + parts.join(', '));
     }
     if (r.unreadable) lines.push('⚠ НЕ МОГУ ПРОЧИТАТЬ СООБЩЕНИЯ: разметка Telegram Web изменилась или чат пуст.');
+    // Прозрачность: показываем КАЖДОЕ просмотренное сообщение и вердикт по нему,
+    // чтобы было видно, что расширение действительно работает и что оно нашло.
+    if (r.recent && r.recent.length) {
+      lines.push('Что разобрали (' + r.recent.length + ' последних):');
+      for (const rec of r.recent) lines.push('  ' + verdictLine(rec).split('\n').join('\n  '));
+    } else if (r.total) {
+      lines.push('Что разобрали: — (в этом проходе сообщения не разбирались)');
+    }
     return lines.join('\n');
   }
 
@@ -588,13 +754,19 @@
     explainTabError,
     normalizePeerId,
     whitelistMismatch,
+    adoptTopicFromWhitelist,
     chatTitleCandidates,
     topicCandidates,
+    VERDICT_LABELS,
+    REASON_LABELS,
+    explainReason,
+    verdictLine,
     normalizeWhitelist,
     normalizeWhitelistEntry,
     matchesWhitelist,
     squashTitle,
     chatKeyOf,
+    messageLink,
     stableId,
     syntheticMessageId,
     detect,

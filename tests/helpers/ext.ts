@@ -25,6 +25,20 @@ export interface ChatRef {
   topicTitle?: string | null;
   /** id рума (топика) из адреса вкладки. */
   topicId?: number | null;
+  /** 'whitelist' — id рума пришлось взять из ссылки в белом списке (клиент его не отдал). */
+  topicIdSource?: string | null;
+}
+
+/** Запись белого списка после разбора (см. core.normalizeWhitelistEntry). */
+export interface WhitelistEntry {
+  kind: 'username' | 'title' | 'peer';
+  value: string;
+  /** Имя рума (топика), если запись вида «чат :: тема». */
+  topic?: string | null;
+  /** id рума из ссылки t.me/<чат>/<рум> или из записи «чат :: 91529». */
+  topicId?: number | null;
+  /** true — рум задан явно; false — ссылка из двух частей, могла быть ссылкой на сообщение. */
+  topicStrict?: boolean;
 }
 
 export interface ExtSettings {
@@ -51,6 +65,10 @@ export interface PayloadMessage {
   chatId: string;
   messageId: number;
   text: string;
+  /** Рум (топик) форум-чата — уходит в контракт, нужен серверу для ссылки. */
+  topicId?: number | null;
+  /** Пермалинк t.me/<чат>[/<рум>]/<сообщение> или null (для панели расширения). */
+  link?: string | null;
   chatTitle: string | null;
   chatUrl: string | null;
   date: number | null;
@@ -90,8 +108,19 @@ export interface CoreApi {
   withDefaults: (raw?: unknown) => ExtSettings;
   /** Текст проблемы с адресом сервера или null, если адрес годится. */
   serverUrlProblem: (raw?: unknown) => string | null;
-  normalizeWhitelist: (list: unknown) => Array<{ kind: string; value: string }>;
+  normalizeWhitelist: (list: unknown) => WhitelistEntry[];
+  normalizeWhitelistEntry: (raw: unknown) => WhitelistEntry | null;
   matchesWhitelist: (chat: ChatRef | null, whitelist: unknown) => boolean;
+  /** Почему открытый чат не подошёл белому списку (или null, если подошёл). */
+  whitelistMismatch: (chat: ChatRef | null, whitelist: unknown) => string | null;
+  /** Рум из белого списка, когда клиент не отдал его id (или null). */
+  adoptTopicFromWhitelist: (chat: ChatRef | null, whitelist: unknown) => { topicId: number; note: string } | null;
+  /** Пермалинк на сообщение: t.me/<чат>[/<рум>]/<сообщение> или null. */
+  messageLink: (chat: ChatRef | null, messageId: unknown, opts?: { synthetic?: boolean; idSource?: string }) => string | null;
+  VERDICT_LABELS: Record<string, string>;
+  REASON_LABELS: Record<string, string>;
+  explainReason: (reason: string | null | undefined) => string;
+  verdictLine: (rec: Record<string, any> | null) => string;
   squashTitle: (s: string) => string;
   chatKeyOf: (chat: ChatRef | null) => string | null;
   stableId: (s: string) => number;
