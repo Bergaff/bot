@@ -452,3 +452,45 @@ describe('румы (топики) форум-супергруппы: счита�
     expect(b.ingestCalls).toHaveLength(1);
   });
 });
+
+describe('повторное внедрение: попап подключается к вкладке без перезагрузки', () => {
+  it('скрипт оставляет на window метку экземпляра — по ней попап понимает, что уже подключён', async () => {
+    const b = await new FakeBrowser().ready();
+    const marker = b.bootMarker();
+    expect(marker).toBeTruthy();
+    expect(marker?.boot?.version).toBeTruthy();
+    expect(marker?.live?.()).toBe(true);
+  });
+
+  it('второе внедрение не плодит ни второй опрос, ни вторую отправку', async () => {
+    const b = await new FakeBrowser().ready();
+    const timers = b.intervalMs.length;
+    expect(timers).toBeGreaterThan(0);
+
+    b.reinject();
+    await b.flush();
+    expect(b.intervalMs).toHaveLength(timers);   // таймер по-прежнему один
+
+    await b.firstTick();
+    expect(b.ingestCalls).toHaveLength(1);       // и проход один, а не два
+  });
+
+  it('прежний экземпляр умер (расширение обновили) — новый запускается и снимает старый таймер', async () => {
+    const b = await new FakeBrowser().ready();
+    const marker = b.bootMarker()!;
+    marker.live = () => false;                   // «Extension context invalidated»
+
+    const timers = b.intervalMs.length;
+    const cleared = b.cleared.length;
+
+    b.reinject();
+    await b.flush();
+
+    expect(b.intervalMs.length).toBe(timers + 1);      // поднялся новый опрос
+    expect(b.cleared.length).toBeGreaterThan(cleared); // старый снят, а не брошен работать
+    expect(b.bootMarker()?.boot?.reinjected).toBe(true);
+
+    await b.firstTick();
+    expect(b.ingestCalls).toHaveLength(1);             // отправляет уже новый экземпляр
+  });
+});

@@ -77,6 +77,7 @@
     <div class="btns">
       <button id="save" class="primary">Сохранить</button>
       <button id="selfcheck" class="primary">Самопроверка</button>
+      <button id="connect" class="primary">Подключить к вкладке</button>
       <button id="check">Проверить сервер</button>
       <button id="diagnose">Диагностика вкладки</button>
       <button id="send">Отправить найденные</button>
@@ -88,6 +89,14 @@
 
     <div class="stats" id="stats"></div>
     <pre id="diag" hidden></pre>
+
+    <div class="note">
+      <b>«Вкладка не отвечает»?</b> Нажмите <b>«Подключить к вкладке»</b> — попап сам внедрит
+      скрипт в открытую вкладку Telegram Web, перезагружать страницу не нужно. Так бывает,
+      если вкладка открыта раньше установки расширения, восстановлена из кэша или расширению
+      урезали доступ к сайту (chrome://extensions → «Доступ к сайту» → «На всех сайтах»).
+      «Самопроверка» тоже пробует подключить сама и показывает весь путь по шагам.
+    </div>
 
     <div class="note">
       Панель сервера видит это расширение как «подключённый аккаунт»: вкладка «чаты» →

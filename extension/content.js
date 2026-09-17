@@ -18,9 +18,31 @@
 (function () {
   'use strict';
 
+  /* Повторное внедрение не должно плодить второй слушатель и второй таймер:
+   * манифест внедряет скрипт при загрузке страницы, а попап умеет подключить его
+   * к уже открытой вкладке сам (chrome.scripting.executeScript). Живой экземпляр
+   * есть — выходим; экземпляр мёртв (расширение обновили, контекст инвалидирован) —
+   * останавливаем его таймер и запускаемся заново. */
+  const scope = (typeof window !== 'undefined' && window) ? window : globalThis;
+  const extId = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) || 'unknown';
+  const prev = scope.__poputchkaBoot;
+  if (prev && prev.extId === extId) {
+    let alive = false;
+    try { alive = Boolean(prev.live && prev.live()); } catch { alive = false; }
+    if (alive) return;
+    try { prev.stop && prev.stop(); } catch { /* старый экземпляр уже не остановить */ }
+  }
+
   /* Слушатель сообщений регистрируется ПЕРВЫМ делом: даже если что-то ниже
    * упадёт, попап получит ответ с текстом ошибки, а не «вкладка не отвечает». */
-  const boot = { version: '1.0.0', startedAt: Date.now(), ok: false, error: null };
+  const boot = {
+    version: '1.0.1',
+    startedAt: Date.now(),
+    ok: false,
+    error: null,
+    // true, если это повторное внедрение вместо умершего экземпляра
+    reinjected: Boolean(prev),
+  };
 
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -58,6 +80,27 @@
     lastChat: null,       // какой чат/рум видели последним
     configFromServer: false,
     configError: null,
+  };
+
+  /* Метка живого экземпляра: по ней повторное внедрение понимает, что работать уже не надо. */
+  scope.__poputchkaBoot = {
+    extId,
+    boot,
+    live: () => {
+      try {
+        // вне расширения (юзерскрипт) chrome может не быть вовсе — экземпляр при этом жив
+        if (typeof chrome === 'undefined' || !chrome.runtime) return true;
+        return Boolean(chrome.runtime.id);
+      } catch {
+        return false; // «Extension context invalidated» — экземпляр мёртв
+      }
+    },
+    stop: () => {
+      try {
+        if (state.timer) clearInterval(state.timer);
+        state.timer = null;
+      } catch { /* таймер мог не завестись */ }
+    },
   };
 
   try {

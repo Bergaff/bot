@@ -93,21 +93,116 @@
     }
   }
 
-  /** Спросить content script в активной вкладке Telegram Web. */
-  async function notifyTab(message) {
+  /** Файлы контент-скрипта — те же и в том же порядке, что в manifest.json. */
+  const CONTENT_FILES = ['vendor/parser.js', 'core.cjs', 'dom.cjs', 'content.js'];
+
+  /** Активная вкладка Telegram Web: { tab } или { error }. */
+  async function telegramTab() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !tab.id) return null;
+    if (!tab || !tab.id) return { error: 'Не нашёл активную вкладку.' };
     if (!/^https:\/\/web\.telegram\.org\//.test(tab.url || '')) {
       return { error: 'Активная вкладка — не Telegram Web (' + (tab.url || 'пусто') +
         '). Откройте web.telegram.org, войдите в аккаунт и зайдите в чат.' };
     }
+    return { tab };
+  }
+
+  /** Спросить контент-скрипт; попытки нужны, потому что после внедрения он поднимается не мгновенно. */
+  async function pingTab(tabId, attempts) {
+    const n = attempts || 1;
+    let last = null;
+    for (let i = 0; i < n; i++) {
+      try {
+        const res = await chrome.tabs.sendMessage(tabId, { type: 'pk:ping' });
+        if (res && res.boot) return res;
+        last = res || { error: 'пустой ответ вкладки' };
+      } catch (e) {
+        last = { error: core.explainTabError(e && e.message ? e.message : e, await readAlive()) };
+      }
+      if (i < n - 1) await new Promise((r) => setTimeout(r, 250));
+    }
+    return last;
+  }
+
+  /** Спросить content script в активной вкладке Telegram Web. */
+  async function notifyTab(message) {
+    const found = await telegramTab();
+    if (found.error) return { error: found.error };
     try {
-      const res = await chrome.tabs.sendMessage(tab.id, message);
+      const res = await chrome.tabs.sendMessage(found.tab.id, message);
       if (res && res.ok === false && res.error) return { error: res.error, res };
       return res;
     } catch (e) {
       return { error: core.explainTabError(e && e.message ? e.message : e, await readAlive()) };
     }
+  }
+
+  /**
+   * Подключить контент-скрипт к уже открытой вкладке — БЕЗ перезагрузки.
+   *
+   * Chrome внедряет скрипт сам при загрузке страницы, но внедрения не будет, если
+   * вкладка открыта раньше установки расширения, восстановлена из кэша, открыта в
+   * другом профиле или расширению урезали доступ к сайту («При клике»). Просить F5
+   * в этих случаях бесполезно, поэтому внедряем скрипт сами (chrome.scripting).
+   */
+  async function connectTab() {
+    const found = await telegramTab();
+    if (found.error) return { ok: false, error: found.error };
+    const tab = found.tab;
+
+    const first = await pingTab(tab.id, 1);
+    if (first && first.boot) return { ok: true, ping: first, already: true };
+
+    if (!chrome.scripting || !chrome.scripting.executeScript) {
+      return {
+        ok: false,
+        error: 'Внедрить скрипт нечем: у расширения нет разрешения «scripting».',
+        hint: 'Так бывает на старой копии папки. Обновите расширение: chrome://extensions → «попутка.» → «Обновить» (↻), ' +
+          'потом нажмите «Подключить к вкладке» ещё раз.',
+      };
+    }
+
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: CONTENT_FILES });
+    } catch (e) {
+      const text = String((e && e.message) || e);
+      return {
+        ok: false,
+        error: 'Браузер не дал внедрить скрипт: ' + text,
+        hint: /permission|access|cannot be scripted|not allowed/i.test(text)
+          ? 'Проверьте доступ к сайту: chrome://extensions → «попутка.» → «Доступ к сайту» → «На всех сайтах», ' +
+            'и что расширение включено. Затем нажмите ещё раз.'
+          : 'Закройте вкладку Telegram Web, откройте её заново и нажмите «Подключить к вкладке».',
+      };
+    }
+
+    const second = await pingTab(tab.id, 4);
+    if (second && second.boot) {
+      return { ok: true, ping: second, injected: true };
+    }
+    return {
+      ok: false,
+      error: 'Скрипт внедрён, но не отвечает' + (second && second.error ? ': ' + second.error : ''),
+      hint: 'Посмотрите ошибки расширения: chrome://extensions → «попутка.» → «Ошибки». ' +
+        'Если там пусто — закройте вкладку и откройте её заново.',
+    };
+  }
+
+  /** Кнопка «Подключить к вкладке»: внедрить скрипт и показать, что получилось. */
+  async function connectNow() {
+    show('warn', 'Подключаюсь к вкладке…');
+    const res = await connectTab();
+    if (res.ok) {
+      const b = res.ping.boot || {};
+      await load();
+      show(b.ok ? 'ok' : 'err',
+        (res.already ? 'Контент-скрипт уже работал' : 'Подключили к вкладке без перезагрузки') +
+        ': версия ' + (b.version || '?') +
+        (b.ok ? ', инициализирован' : ', но не инициализирован: ' + (b.error || 'неизвестная ошибка')) +
+        '. Нажмите «Самопроверка», чтобы увидеть всю цепочку.');
+      return;
+    }
+    show('err', res.error + (res.hint ? ' ' + res.hint : ''));
   }
 
   /**
@@ -125,16 +220,34 @@
       ? '   ✓ это Telegram Web'
       : '   ✗ нужна вкладка https://web.telegram.org/… — остальные расширением не читаются');
 
-    const ping = await notifyTab({ type: 'pk:ping' });
+    let ping = await notifyTab({ type: 'pk:ping' });
+    let connectNote = null;
+    if (!(ping && ping.boot)) {
+      // не отвечаем «нажмите F5», а пробуем внедрить скрипт сами
+      const conn = await connectTab();
+      if (conn.ok) {
+        ping = conn.ping;
+        connectNote = conn.already ? null : 'внедрили сами, перезагрузка не понадобилась';
+      } else {
+        connectNote = conn.error + (conn.hint ? ' ' + conn.hint : '');
+      }
+    }
+
     if (ping && ping.boot) {
-      lines.push('2. Контент-скрипт: ' + (ping.boot.ok ? '✓ загружен и инициализирован' : '✗ загружен, но не инициализирован'));
-      lines.push('   версия ' + (ping.boot.version || '?') + ', запущен ' + new Date(ping.boot.startedAt).toLocaleTimeString('ru-RU', { hour12: false }));
+      lines.push('2. Контент-скрипт: ' +
+        (ping.boot.ok ? '✓ загружен и инициализирован' : '✗ загружен, но не инициализирован') +
+        (connectNote ? ' — ' + connectNote : ''));
+      lines.push('   версия ' + (ping.boot.version || '?') + ', запущен ' +
+        new Date(ping.boot.startedAt).toLocaleTimeString('ru-RU', { hour12: false }) +
+        (ping.boot.reinjected ? ' (повторное внедрение вместо умершего экземпляра)' : ''));
       if (ping.boot.error) lines.push('   ошибка: ' + ping.boot.error);
     } else if (alive) {
-      lines.push('2. Контент-скрипт: ✗ не отвечает, но отметка «жив» есть от ' +
-        new Date(alive.at).toLocaleString('ru-RU', { hour12: false }) + ' → обновите вкладку (F5)');
+      lines.push('2. Контент-скрипт: ✗ не отвечает, хотя отметка «жив» есть от ' +
+        new Date(alive.at).toLocaleString('ru-RU', { hour12: false }));
+      lines.push('   → ' + (connectNote || 'нажмите «Подключить к вкладке» или обновите её (F5)'));
     } else {
-      lines.push('2. Контент-скрипт: ✗ не подключён к вкладке → обновите web.telegram.org (F5)');
+      lines.push('2. Контент-скрипт: ✗ не подключён к вкладке');
+      lines.push('   → ' + (connectNote || 'нажмите «Подключить к вкладке»'));
     }
 
     const urlProblem = core.serverUrlProblem(settings.serverUrl);
@@ -240,6 +353,7 @@
 
   $('save').addEventListener('click', saveSettings);
   $('selfcheck').addEventListener('click', selfCheck);
+  $('connect').addEventListener('click', connectNow);
   $('sync').addEventListener('click', syncFromPanel);
   $('check').addEventListener('click', checkServer);
   $('diagnose').addEventListener('click', diagnose);

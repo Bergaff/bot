@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         попутка. — сбор объявлений из чатов Telegram Web
 // @namespace    https://github.com/Bergaff/bot
-// @version      1.0.0
+// @version      1.0.1
 // @description  Только чтение: находит объявления о передаче посылок в открытой вкладке Telegram Web и отправляет их на сервер попутки (POST /api/ingest). Ничего не публикует от вашего имени.
 // @match        https://web.telegram.org/*
 // @run-at       document-idle
@@ -27,6 +27,11 @@
  *   location.reload();
  *
  * Счётчики и лог отправленного живут там же; панель — справа внизу вкладки.
+ *
+ * Версия 1.0.1: контент-скрипт помечает свой экземпляр на window и при повторном
+ * внедрении не плодит второй таймер (попап расширения умеет подключаться к уже
+ * открытой вкладке сам — chrome.scripting; у юзерскрипта такой возможности нет,
+ * там достаточно перезагрузки страницы).
  *
  * Если на сервере заданы настройки из админки (вкладка «чаты» → «Аккаунт Telegram
  * (расширение)»), они перекрывают локальные: клиент каждый проход спрашивает
@@ -551,10 +556,12 @@
       }
       if (alive && ageText) {
         return 'Расширение отвечало в этой вкладке ' + ageText + ', но сейчас не отвечает. ' +
-          'Обновите web.telegram.org (F5) и нажмите ещё раз.';
+          'Нажмите «Подключить к вкладке» (или обновите web.telegram.org — F5) и повторите.';
       }
-      return 'Контент-скрипт не подключён к этой вкладке: она открыта раньше установки расширения ' +
-        '(или это другой профиль браузера). Обновите web.telegram.org (F5) — расширение подключается при загрузке страницы.';
+      return 'Контент-скрипт не подключён к этой вкладке: она открыта раньше установки расширения, ' +
+        'восстановлена из кэша или расширению урезали доступ к сайту. Нажмите «Подключить к вкладке» — ' +
+        'попап внедрит скрипт сам, без перезагрузки. Если кнопки нет (старая копия папки), обновите ' +
+        'web.telegram.org (F5) и проверьте chrome://extensions → «Доступ к сайту» → «На всех сайтах».';
     }
     if (/Cannot access|Permission|not allowed|May not be permitted/i.test(text)) {
       return 'Браузер не даёт расширению доступ к вкладке: ' + text +
@@ -1205,9 +1212,31 @@
 (function () {
   'use strict';
 
+  /* Повторное внедрение не должно плодить второй слушатель и второй таймер:
+   * манифест внедряет скрипт при загрузке страницы, а попап умеет подключить его
+   * к уже открытой вкладке сам (chrome.scripting.executeScript). Живой экземпляр
+   * есть — выходим; экземпляр мёртв (расширение обновили, контекст инвалидирован) —
+   * останавливаем его таймер и запускаемся заново. */
+  const scope = (typeof window !== 'undefined' && window) ? window : globalThis;
+  const extId = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) || 'unknown';
+  const prev = scope.__poputchkaBoot;
+  if (prev && prev.extId === extId) {
+    let alive = false;
+    try { alive = Boolean(prev.live && prev.live()); } catch { alive = false; }
+    if (alive) return;
+    try { prev.stop && prev.stop(); } catch { /* старый экземпляр уже не остановить */ }
+  }
+
   /* Слушатель сообщений регистрируется ПЕРВЫМ делом: даже если что-то ниже
    * упадёт, попап получит ответ с текстом ошибки, а не «вкладка не отвечает». */
-  const boot = { version: '1.0.0', startedAt: Date.now(), ok: false, error: null };
+  const boot = {
+    version: '1.0.1',
+    startedAt: Date.now(),
+    ok: false,
+    error: null,
+    // true, если это повторное внедрение вместо умершего экземпляра
+    reinjected: Boolean(prev),
+  };
 
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -1245,6 +1274,27 @@
     lastChat: null,       // какой чат/рум видели последним
     configFromServer: false,
     configError: null,
+  };
+
+  /* Метка живого экземпляра: по ней повторное внедрение понимает, что работать уже не надо. */
+  scope.__poputchkaBoot = {
+    extId,
+    boot,
+    live: () => {
+      try {
+        // вне расширения (юзерскрипт) chrome может не быть вовсе — экземпляр при этом жив
+        if (typeof chrome === 'undefined' || !chrome.runtime) return true;
+        return Boolean(chrome.runtime.id);
+      } catch {
+        return false; // «Extension context invalidated» — экземпляр мёртв
+      }
+    },
+    stop: () => {
+      try {
+        if (state.timer) clearInterval(state.timer);
+        state.timer = null;
+      } catch { /* таймер мог не завестись */ }
+    },
   };
 
   try {

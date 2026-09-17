@@ -48,6 +48,8 @@ export class FakeBrowser {
   readonly intervals: Array<() => void> = [];
   /** с каким интервалом зарегистрирован опрос (мс) */
   readonly intervalMs: number[] = [];
+  /** какие таймеры сняты (clearInterval) — по ним видно, что старый экземпляр остановлен */
+  readonly cleared: number[] = [];
   readonly timeouts: Array<() => void> = [];
   private response: FakeResponse = { status: 200, body: { ok: true, summary: {}, results: [] } };
   private readonly doc: FakeDocument;
@@ -94,7 +96,7 @@ export class FakeBrowser {
         self.intervalMs.push(Number(ms) || 0);
         return self.intervals.length;
       },
-      clearInterval: () => undefined,
+      clearInterval: (id: unknown) => { self.cleared.push(Number(id)); },
       setTimeout: (fn: () => void) => { self.timeouts.push(fn); return self.timeouts.length; },
     });
 
@@ -131,6 +133,19 @@ export class FakeBrowser {
     const fn = this.timeouts[this.timeouts.length - 1];
     if (fn) fn();
     await this.flush();
+  }
+
+  /**
+   * Внедрить контент-скрипт в уже работающую страницу ещё раз — так делает попап
+   * кнопкой «Подключить к вкладке» (chrome.scripting.executeScript).
+   */
+  reinject(): void {
+    vm.runInContext(readFileSync(new URL('content.js', EXT), 'utf8'), this.context, { filename: 'content.js (повторно)' });
+  }
+
+  /** Метка живого экземпляра, которую контент-скрипт оставляет на window. */
+  bootMarker(): { extId?: string; boot?: Record<string, any>; live?: () => boolean; stop?: () => void } | undefined {
+    return (this.context.window as Record<string, any>).__poputchkaBoot;
   }
 
   /** Проход по таймеру опроса. */
