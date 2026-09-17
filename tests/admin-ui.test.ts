@@ -117,6 +117,11 @@ export function createAdminUi(opts: {
   const requests: UiRequest[] = [];
   const toasts: string[] = [];
   const store = new Map<string, string>();
+  // список чатов обхода живой: POST добавляет, DELETE убирает — как в настоящей БД.
+  // Без этого нельзя проверить, что таблица обновляется БЕЗ перезагрузки страницы.
+  const chatState: any[] = Array.isArray(opts.watchChats ?? WATCH_CHATS)
+    ? [...((opts.watchChats ?? WATCH_CHATS) as any[])]
+    : [];
 
   const page = new FakeNode('div');
   const list = new FakeNode('div', { attrs: { id: 'admin-list' } });
@@ -171,9 +176,27 @@ export function createAdminUi(opts: {
         return respond(200, { items: tab === 'board' ? all.filter((l) => l.status !== 'pending') : all.filter((l) => l.status === 'pending') });
       }
       if (method === 'GET' && path === '/api/admin/watch-chats') {
-        const chats = opts.watchChats ?? WATCH_CHATS;
-        if (Array.isArray(chats)) return respond(200, { chats });
-        return respond(200, { chats: [], needsSetup: true });
+        if (opts.watchChats && !Array.isArray(opts.watchChats)) return respond(200, { chats: [], needsSetup: true });
+        return respond(200, { chats: chatState });
+      }
+      if (method === 'POST' && path === '/api/admin/watch-chats') {
+        const username = String(body?.username ?? '')
+          .replace(/^https?:\/\/t\.me\//, '').replace(/^@/, '').trim();
+        if (!username) return respond(400, { error: 'username required' });
+        if (chatState.some((c) => c.username === username)) return respond(409, { error: 'chat already watched' });
+        const chat = {
+          id: `web:${username}`, username, kind: body?.kind === 'supergroup' ? 'supergroup' : 'channel',
+          title: null, enabled: true, lastMessageId: null, lastCheckedAt: null, lastError: null,
+          errorCount: 0, statsFound: 0, statsCreated: 0, statsSkipped: 0, addedAt: '2026-09-16 14:00:00',
+        };
+        chatState.push(chat);
+        return respond(200, { ok: true, chat });
+      }
+      if (method === 'DELETE' && path.startsWith('/api/admin/watch-chats/')) {
+        const id = decodeURIComponent(path.slice('/api/admin/watch-chats/'.length));
+        const i = chatState.findIndex((c) => c.id === id);
+        if (i >= 0) chatState.splice(i, 1);
+        return respond(200, { ok: true });
       }
       if (method === 'GET' && path === '/api/admin/collect/status') {
         return opts.status === null ? respond(500, { error: 'boom' }) : respond(200, opts.status ?? STATUS);
@@ -434,6 +457,20 @@ describe('таблица чатов обхода', () => {
     expect(del?.path).toBe('/api/admin/watch-chats/web%3Aoff_chat');
   });
 
+  it('после «удалить» строка пропадает сама — перезагружать страницу не нужно', async () => {
+    const ui = createAdminUi();
+    const box = await renderBlock(ui);
+    expect(queryAll(box, 'tbody tr')).toHaveLength(3);
+    expect(box.textContent).toContain('off_chat');
+
+    await ui.click(ui.buttonByText('удалить', queryAll(box, 'tbody tr')[2]!));
+
+    // тот же смонтированный узел: строки стало две, удалённого чата в нём нет
+    expect(queryAll(box, 'tbody tr')).toHaveLength(2);
+    expect(box.textContent).not.toContain('off_chat');
+    expect(box.textContent).toContain('durov');
+  });
+
   it('ошибка прогона показывается модератору, а не теряется', async () => {
     const ui = createAdminUi({
       collectReport: { totals: {}, chats: [{ username: 'durov', status: 'error', new: 0, created: 0, error: 'fetch failed' }] },
@@ -458,6 +495,19 @@ describe('форма добавления чата в обход', () => {
     const post = ui.requests.find((r) => r.method === 'POST' && r.path === '/api/admin/watch-chats');
     expect(post?.body).toEqual({ username: 'https://t.me/posylki_pl_by', kind: 'supergroup' });
     expect(ui.toasts.join('\n')).toContain('Чат добавлен');
+  });
+
+  it('добавленный чат сразу появляется в таблице — без перезагрузки страницы', async () => {
+    const ui = createAdminUi();
+    const box = await renderBlock(ui);
+    const input = queryAll(box, 'input[type=text]')[0]!;
+    input.value = 'https://t.me/posylki_pl_by';
+
+    await ui.click(ui.buttonByText('добавить в обход', box));
+
+    expect(box.textContent).toContain('posylki_pl_by');
+    expect(queryAll(box, 'tbody tr')).toHaveLength(4);
+    expect(input.value).toBe('');
   });
 
   it('пустой ввод и повтор чата не создают мусорных запросов', async () => {

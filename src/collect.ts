@@ -345,12 +345,12 @@ async function collectOneChat(state: RunState, chat: WatchChat): Promise<Collect
     result.pages = page;
 
     if (preview.status === 0) return fail('network_error', 'fetch failed (timeout/network)');
-    if (preview.status === 404) return fail('missing', 'chat not found (404)', true);
+    if (preview.status === 404) return fail('missing', 'нет веб-превью (404): чат приватный или история закрыта — такой чат берёт только расширение из вкладки Telegram Web', true);
     if (preview.status === 429) return fail('blocked', 'http_429: слишком частые запросы к t.me');
     if (preview.status !== 200) return fail(`http_${preview.status}`, `t.me ответил ${preview.status}`);
 
     const diagnosis = diagnosePage(preview);
-    if (diagnosis === 'missing') return fail('missing', 'чат удалён/переименован или превью недоступно', true);
+    if (diagnosis === 'missing') return fail('missing', 'превью недоступно: чат удалён/переименован или история закрыта — такой чат берёт только расширение из вкладки Telegram Web', true);
     if (diagnosis === 'blocked') return fail('blocked', 'капча/бан-стена вместо страницы превью');
     if (diagnosis === 'markup_changed') {
       return fail('markup_changed', 'markup_changed? (страница 200, но контейнеров сообщений нет)');

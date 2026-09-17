@@ -149,9 +149,17 @@ function autoCollectReport(status) {
   ])));
 }
 
-/** Отрисовать блок «Авто-сбор публичных чатов» (вызывается из renderAdminChats). */
+/** Куда блок смонтирован: кнопки (добавить/удалить/включить/проверить) обновляют
+ *  таблицу на месте, перезагружать страницу не нужно. */
+let autoCollectBox = null;
+
+/**
+ * Отрисовать блок «Авто-сбор публичных чатов» (вызывается из renderAdminChats).
+ * Без аргумента — перерисовать уже смонтированный блок (именно так делают кнопки).
+ */
 async function renderAutoCollect(container) {
-  const box = container ?? el('section', { class: 'admin-block' });
+  const box = container ?? autoCollectBox ?? el('section', { class: 'admin-block' });
+  autoCollectBox = box;
   box.replaceChildren(el('p', { class: 'empty-note', text: 'Загружаем авто-сбор…' }));
   try {
     const [chatsRes, statusRes] = await Promise.all([

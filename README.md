@@ -34,7 +34,7 @@ npm run server                                    # HTTP API: /api/ingest + ад
 npm run daemon -- --every 900                     # обход каждые 15 мин (замена cron)
 ```
 
-`npm test` — 359 тестов, `npm run typecheck` — `tsc --noEmit`.
+`npm test` — 361 тест, `npm run typecheck` — `tsc --noEmit`.
 
 Локально D1 и KV заменяет встроенный `node:sqlite` (`local/sqlite-env.ts`), поэтому код из `src/` не знает, где он запущен: в воркере — настоящие биндинги, на вашей машине — sqlite-файл.
 
@@ -69,6 +69,9 @@ npm run collect -- --base-url http://127.0.0.1:8899/s --dry
 
 То же зеркало, но сразу с админкой и настоящим API: `node parcel/demo/server.mjs` →
 http://localhost:8790 (подробно — [`parcel/demo/README.md`](parcel/demo/README.md)).
+Демо-сервер сам выбирает источник превью: если `t.me` доступен — ходит на настоящий
+`https://t.me/s` (добавлять можно любые публичные чаты), иначе падает на зеркало
+(принудительно — `DEMO_OFFLINE=1`, свой адрес — `COLLECT_PREVIEW_BASE=…`).
 
 ---
 
@@ -286,7 +289,7 @@ curl -X POST https://<worker>/api/ingest \
 | `extension/popup.*`, `manifest.json` | настройки, счётчики, «Проверить сервер», «Диагностика вкладки» | 3 |
 | `extension/vendor/parser.js` | бандл `src/parser.ts` (esbuild) — клиентский детект до отправки | 3 |
 | `userscript/poputchka-collector.user.js` | тот же клиент одним файлом (собирается `npm run build:ext`) | 3 |
-| `tests/` | 359 тестов + фикстуры разметки, мини-DOM и мини-браузер | 1–7 |
+| `tests/` | 361 тест + фикстуры разметки, мини-DOM и мини-браузер | 1–7 |
 
 Квоты ИИ разведены по каналам (ТЗ п. 2.4, 3.5, 4.4): `ai:day:*` — бот (300/день), `ai:collect:day:*` — сборщик, `ai:ingest:day:*` — расширение (по `COLLECT_AI_DAILY_LIMIT`, 100/день). При исчерпании своего счётчика канал продолжает разбирать правила — сбор не встаёт.
 
@@ -295,7 +298,7 @@ curl -X POST https://<worker>/api/ingest \
 ## Тесты
 
 ```bash
-npm test              # 359 тестов
+npm test              # 361 тест
 npm run typecheck
 npm run build:ext     # бандл парсера для клиента + юзерскрипт одним файлом
 ```

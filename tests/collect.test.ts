@@ -253,6 +253,8 @@ describe('collectPublicChats: прогон по watch_chats', () => {
     });
     const chat = report.chats[0]!;
     expect(chat.status).toBe('missing');
+    // текст ошибки должен подсказывать выход: такой чат берёт только расширение
+    expect(chat.error).toContain('расширение');
     expect(chat.disabled).toBe(true);
     expect(chat.cursorAfter).toBeNull();
     expect((await getWatchChat(env, 'web:gone_channel'))?.enabled).toBe(false);

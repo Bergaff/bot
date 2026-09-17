@@ -7,9 +7,11 @@
  *      type="module", поэтому блок вставляется в файл, а не подключается отдельно);
  *   2. НАСТОЯЩИЙ API из src/server.ts (watch-chats, collect, collect/status,
  *      ingest) на локальном sqlite вместо D1 — те же роуты, что поедут в воркер;
- *   3. зеркало t.me/s/ на фикстурах (local/mock-tme.mjs) — сборщик переключается
- *      на него переменной COLLECT_PREVIEW_BASE, поэтому «проверить сейчас»
- *      работает без интернета.
+ *   3. источник веб-превью t.me/s/: по умолчанию НАСТОЯЩИЙ https://t.me/s, если он
+ *      доступен (обычная машина разработчика — можно добавлять любые публичные
+ *      чаты), иначе локальное зеркало на фикстурах (local/mock-tme.mjs) — тогда
+ *      «проверить сейчас» работает без интернета, но знает только чаты из фикстур.
+ *      Переопределяется COLLECT_PREVIEW_BASE, зеркало принудительно — DEMO_OFFLINE=1.
  *
  * Плюс заглушки тех ручек parcel, которые уже существуют в проде, но не входят
  * в этот репозиторий: /api/admin/listings, /source-chats, /chat-links.
@@ -43,6 +45,7 @@ const HOST = '0.0.0.0';
 const ADMIN_TOKEN = 'demo-admin-token';
 const INGEST_TOKEN = 'demo-ingest-token';
 const DB_PATH = resolve(here, '..', '..', '.data', 'demo.db');
+const MIRROR_BASE = `http://127.0.0.1:${PORT}/mirror/s`;
 
 const env = createLocalEnv({
   dbPath: DB_PATH,
@@ -56,10 +59,29 @@ const env = createLocalEnv({
     // показывало и созданные заявки, и отсев по возрасту
     COLLECT_MAX_AGE_DAYS: '200',
     COLLECT_AI_DAILY_LIMIT: '20',
-    COLLECT_PREVIEW_BASE: `http://127.0.0.1:${PORT}/mirror/s`,
+    COLLECT_PREVIEW_BASE: process.env.COLLECT_PREVIEW_BASE || MIRROR_BASE,
   },
 });
 const app = createApp();
+
+/**
+ * Куда сборщику ходить за веб-превью: настоящий t.me, если он отвечает,
+ * иначе локальное зеркало (песочница/CI без интернета).
+ */
+async function pickPreviewBase() {
+  if (process.env.COLLECT_PREVIEW_BASE) {
+    return { base: process.env.COLLECT_PREVIEW_BASE, note: 'из переменной COLLECT_PREVIEW_BASE' };
+  }
+  if (process.env.DEMO_OFFLINE === '1') return { base: MIRROR_BASE, note: 'зеркало, DEMO_OFFLINE=1' };
+  try {
+    const res = await fetch('https://t.me/s/durov', { redirect: 'manual', signal: AbortSignal.timeout(6000) });
+    if (res.status < 500) return { base: 'https://t.me/s', note: 'настоящий t.me' };
+  } catch { /* t.me недоступен — остаёмся на зеркале */ }
+  return { base: MIRROR_BASE, note: 'зеркало на фикстурах, t.me недоступен' };
+}
+
+const preview = await pickPreviewBase();
+env.COLLECT_PREVIEW_BASE = preview.base;
 
 /* ------------------------------------------------------------------ */
 /* Демо-данные                                                         */
@@ -319,7 +341,14 @@ server.listen(PORT, HOST, () => {
   console.log(`демо админки (этап 6): http://${HOST}:${PORT}/`);
   console.log(`  БД: ${DB_PATH}`);
   console.log(`  ADMIN_API_TOKEN=${ADMIN_TOKEN}  INGEST_TOKEN=${INGEST_TOKEN}`);
-  console.log(`  зеркало t.me/s/: http://127.0.0.1:${PORT}/mirror/s/durov`);
+  console.log(`  источник превью t.me/s: ${preview.base}  (${preview.note})`);
+  if (preview.base === MIRROR_BASE) {
+    console.log(`    зеркало знает только чаты из фикстур: ${SEED_CHATS.map((c) => c.username).join(', ')}`);
+    console.log('    остальные юзернеймы дадут «нет веб-превью» — это не баг, а отсутствие интернета');
+  } else {
+    console.log('    добавлять можно любые публичные чаты/каналы с открытой историей');
+  }
+  console.log(`  зеркало t.me/s/ (для проверки): http://127.0.0.1:${PORT}/mirror/s/durov`);
   console.log(`  настоящий API: /api/admin/watch-chats, /api/admin/collect, /api/admin/collect/status, /api/ingest`);
   console.log('');
   console.log('  Что вписать в попап расширения (иконка «попутка. — сбор объявлений»):');

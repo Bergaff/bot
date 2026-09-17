@@ -2,7 +2,9 @@
 
 Один процесс, в котором можно **пощупать блок авто-сбора до правки прод-файла** `public/app.js`
 в `Bergaff/parcel`: настоящая разметка админки, настоящий API из `src/server.ts`, настоящая
-база (sqlite вместо D1/KV) и зеркало `t.me/s/` на фикстурах — то есть интернет не нужен.
+база (sqlite вместо D1/KV) и веб-превью `t.me/s/`: если `t.me` доступен, сборщик ходит на
+настоящий Telegram (добавлять можно любые публичные чаты), иначе включается зеркало на
+фикстурах — то есть демо работает и без интернета.
 
 Зачем:
 
@@ -27,8 +29,17 @@ node parcel/demo/server.mjs 9000   # свой порт
 ```
 демо админки (этап 6): http://0.0.0.0:8790/
   ADMIN_API_TOKEN=demo-admin-token  INGEST_TOKEN=demo-ingest-token
-  зеркало t.me/s/: http://127.0.0.1:8790/mirror/s/durov
+  источник превью t.me/s: https://t.me/s  (настоящий t.me)
+    добавлять можно любые публичные чаты/каналы с открытой историей
   настоящий API: /api/admin/watch-chats, /api/admin/collect, /api/admin/collect/status, /api/ingest
+```
+
+Без интернета вместо двух средних строк будет:
+
+```
+  источник превью t.me/s: http://127.0.0.1:8790/mirror/s  (зеркало на фикстурах, t.me недоступен)
+    зеркало знает только чаты из фикстур: durov, drivers_pl_by, posylki_pl_by, off_chat
+    остальные юзернеймы дадут «нет веб-превью» — это не баг, а отсутствие интернета
 ```
 
 База создаётся при первом запуске: `.data/demo.db` в корне репозитория. Ключ админа
@@ -51,7 +62,7 @@ node parcel/demo/server.mjs 9000   # свой порт
 | `demo.js` | демо-обвязка | копии `loadAdmin()` и `renderAdminChats()` из `app.js` — **уже с Правками 1–3**, переключение вкладок, сброс демо |
 | `/api/*` (кроме заглушек) | `src/server.ts` → `app.fetch(request, env)` | настоящий код воркера: `watch-chats`, `collect`, `collect/status`, `ingest`, CORS, rate limit |
 | база и KV | `local/sqlite-env.ts` (`node:sqlite`) | D1 и KV заменены одним файлом; код из `src/` разницы не замечает |
-| `/mirror/s/<username>` | `local/mock-tme.mjs` + `tests/fixtures/` | веб-превью без интернета; `COLLECT_PREVIEW_BASE` указывает на зеркало |
+| `/mirror/s/<username>` | `local/mock-tme.mjs` + `tests/fixtures/` | веб-превью без интернета: `COLLECT_PREVIEW_BASE` переключает сборщик на зеркало (по умолчанию сервер сам выбирает — настоящий `t.me`, если он отвечает) |
 | демо-заглушки | `server.mjs` → `src/store.ts` | `/api/admin/listings`, `/source-chats`, `/chat-links`, `/ensure-chat-links`, `/demo/reset`: в `parcel` эти ручки уже есть, в этом standalone-репозитории — нет |
 
 Окружение демо (задаётся в `server.mjs`):
@@ -61,7 +72,9 @@ ADMIN_API_TOKEN: 'demo-admin-token', INGEST_TOKEN: 'demo-ingest-token',
 COLLECT_ENABLED: '1', COLLECT_MAX_CHATS: '10', COLLECT_MAX_PAGES: '2',
 COLLECT_MAX_AGE_DAYS: '200',        // фикстуры датированы прошлыми месяцами
 COLLECT_AI_DAILY_LIMIT: '20',       // AI_API_KEY не задан → ИИ не вызывается вовсе
-COLLECT_PREVIEW_BASE: 'http://127.0.0.1:8790/mirror/s',
+// COLLECT_PREVIEW_BASE выбирается при старте: https://t.me/s, если t.me отвечает,
+// иначе http://127.0.0.1:8790/mirror/s. Переопределяется переменной окружения
+// COLLECT_PREVIEW_BASE, зеркало принудительно — DEMO_OFFLINE=1.
 ```
 
 ---
