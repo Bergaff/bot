@@ -2,6 +2,11 @@
 setlocal
 cd /d "%~dp0"
 
+rem Port: first argument, or 8790. The server itself picks the next free
+rem port when 8790 is taken by another program and says so.
+set SRVPORT=%~1
+if "%SRVPORT%"=="" set SRVPORT=8790
+
 echo.
 echo   poputchka. local server  -  admin panel + /api/ingest + t.me/s mirror
 echo   =====================================================================
@@ -32,10 +37,16 @@ if not exist node_modules (
 )
 
 echo.
-echo   Values for the browser extension popup - the server prints them below too:
-echo     serverUrl : http://127.0.0.1:8790
+echo   Values for the browser extension popup - the server prints the final ones below:
+echo     serverUrl : http://127.0.0.1:%SRVPORT%
 echo     token     : demo-ingest-token
-echo     admin UI  : http://localhost:8790
+echo     admin UI  : http://localhost:%SRVPORT%
+echo.
+echo   Port %SRVPORT% already in use?
+echo     - if it is a previous run of THIS server, it will say so and give the URL;
+echo     - if another program took it, the server moves to the next free port
+echo       and prints the serverUrl to put into the extension popup;
+echo     - to choose a port yourself:  start-local.bat 8791
 echo.
 echo   Full step-by-step guide in Russian: docs\try-it.md
 echo   Install the extension: chrome://extensions - Developer mode -
@@ -45,8 +56,16 @@ echo   Stop the server with Ctrl+C
 echo   ---------------------------------------------------------------------
 echo.
 
-node parcel\demo\server.mjs
+if "%~1"=="" (
+  node parcel\demo\server.mjs
+) else (
+  node parcel\demo\server.mjs %~1
+)
 
 echo.
-echo   Server stopped.
+if errorlevel 1 (
+  echo   [!] The server did not start - the reason is printed above.
+) else (
+  echo   Server stopped. If it said "already running", just open that URL.
+)
 pause

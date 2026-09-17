@@ -40,10 +40,115 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const parcelDir = resolve(here, '..');
-const PORT = Number(process.argv[2] ?? process.env.PORT ?? 8790);
 const HOST = '0.0.0.0';
+const DEFAULT_PORT = 8790;
 const ADMIN_TOKEN = 'demo-admin-token';
 const INGEST_TOKEN = 'demo-ingest-token';
+
+/**
+ * Порт: `--port=N`, `--port N` или просто `N` аргументом → переменная PORT → 8790.
+ * Явно заданный порт не подменяем: если занят, объясняем и выходим.
+ */
+function parsePortArg() {
+  const args = process.argv.slice(2);
+  const i = args.findIndex((a) => a === '--port' || a.startsWith('--port=') || /^\d{2,5}$/.test(a));
+  if (i < 0) {
+    if (args.length > 0) {
+      console.error(`Не понял аргумент «${String(args[0])}». Порт задаётся числом:`);
+      console.error('  node parcel/demo/server.mjs 8791     (или --port=8791, или PORT=8791)');
+      process.exit(1);
+    }
+    const n = Number(process.env.PORT ?? DEFAULT_PORT);
+    return { port: Number.isInteger(n) && n > 0 ? n : DEFAULT_PORT, explicit: Boolean(process.env.PORT) };
+  }
+  const raw = args[i] === '--port' ? args[i + 1] : (String(args[i]).startsWith('--port=') ? String(args[i]).slice(7) : args[i]);
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    console.error(`Не понял порт «${String(raw)}»: нужно число 1..65535.`);
+    console.error('Пример: node parcel/demo/server.mjs 8791');
+    process.exit(1);
+  }
+  return { port: n, explicit: true };
+}
+
+/** Наш ли сервер уже сидит на порту — чтобы не плодить второй, а отправить человека в браузер. */
+async function isOurServer(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/demo/ping`, { signal: AbortSignal.timeout(800) });
+    if (!res.ok) return false;
+    const body = await res.json();
+    return Boolean(body) && body.app === 'poputchka-demo';
+  } catch {
+    return false; // порт занят чужой программой или она не отвечает — значит, это не мы
+  }
+}
+
+function portIsFree(port) {
+  return new Promise((done) => {
+    const probe = createServer();
+    probe.once('error', () => done(false));
+    probe.once('listening', () => probe.close(() => done(true)));
+    probe.listen(port, HOST);
+  });
+}
+
+function printPortBusy(port) {
+  const win = process.platform === 'win32';
+  console.error('');
+  console.error(`Порт ${port} занят другой программой — сервер не поднялся.`);
+  console.error('  Кто занял порт:');
+  if (win) {
+    console.error(`    netstat -ano | findstr :${port}     (в последнем столбце PID)`);
+    console.error('    taskkill /PID <номер> /F');
+  } else {
+    console.error(`    lsof -i :${port}                    (PID в колонке PID)`);
+    console.error('    kill <номер>');
+  }
+  console.error(`  Либо запустить на другом порту: ${win ? 'start-local.bat 8791' : './start-local.sh 8791'}`);
+  console.error('  и в попапе расширения указать тот же порт: serverUrl http://127.0.0.1:8791');
+}
+
+/**
+ * Выбрать порт: свободный → работаем; на нём наш сервер → «уже запущен» и выход 0;
+ * занят чужим → подсказка (и, если порт не задан явно, пробуем следующий, +1..+10).
+ */
+async function pickPort(start, explicit) {
+  const attempts = explicit ? 1 : 11;
+  for (let step = 0; step < attempts; step++) {
+    const port = start + step;
+    if (port > 65535) break;
+
+    if (await portIsFree(port)) {
+      if (step > 0) {
+        console.log(`Работаю на порту ${port}. В попапе расширения укажите serverUrl: http://127.0.0.1:${port}`);
+      }
+      return port;
+    }
+
+    if (await isOurServer(port)) {
+      console.log('');
+      console.log(`Сервер уже запущен на порту ${port} — второй поднимать не нужно.`);
+      console.log(`  Админка:   http://localhost:${port}/`);
+      console.log(`  Для попапа расширения: serverUrl http://127.0.0.1:${port}   token ${INGEST_TOKEN}`);
+      console.log('  Это не то окно? Закройте предыдущий сервер (Ctrl+C) и запустите снова.');
+      process.exit(0);
+    }
+
+    // порт не наш и не свободен: сдвигаемся молча, диагноз — только когда сдвигаться некуда
+    if (step < attempts - 1) {
+      console.log(`Порт ${port} занят — пробую ${port + 1}…`);
+      continue;
+    }
+    printPortBusy(port);
+    process.exit(1);
+  }
+  console.error(`Свободного порта не нашлось (${start}..${Math.min(65535, start + attempts - 1)}).`);
+  console.error('Задайте свой: node parcel/demo/server.mjs 9000');
+  process.exit(1);
+}
+
+const { port: REQUESTED_PORT, explicit: PORT_EXPLICIT } = parsePortArg();
+const PORT = await pickPort(REQUESTED_PORT, PORT_EXPLICIT);
 const DB_PATH = resolve(here, '..', '..', '.data', 'demo.db');
 const MIRROR_BASE = `http://127.0.0.1:${PORT}/mirror/s`;
 
@@ -281,6 +386,12 @@ const server = createServer(async (req, res) => {
   const path = url.pathname;
 
   try {
+    /* метка «это наш демо-сервер»: по ней второй запуск понимает, что порт занят своим */
+    if (path === '/api/demo/ping') {
+      json(res, 200, { ok: true, app: 'poputchka-demo', port: PORT, pid: process.pid });
+      return;
+    }
+
     if (!seeded) {
       seeded = true;
       const existing = await listPending(env, 1);
@@ -362,6 +473,18 @@ server.listen(PORT, HOST, () => {
   console.log('  Порядок: chrome://extensions → Режим разработчика → «Загрузить распакованное»');
   console.log('  → папка extension/ → открыть https://web.telegram.org → в попапе «Самопроверка».');
   console.log('  Подробно и с таблицей ошибок: docs/try-it.md');
+});
+
+server.on('error', (e) => {
+  // гонка: порт заняли между проверкой и listen — не роняемся стеком, объясняем
+  if (e && (e.code === 'EADDRINUSE' || e.code === 'EACCES')) {
+    printPortBusy(PORT);
+    env.close();
+    process.exit(1);
+  }
+  console.error('demo server listen error:', e);
+  env.close();
+  process.exit(1);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
