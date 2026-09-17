@@ -1,0 +1,6 @@
+# Лаунчеры чувствительны к переводам строк: cmd.exe ломается на LF, bash — на CRLF.
+# *.bat храним как есть (CRLF в репозитории), чтобы и git clone, и ZIP с GitHub
+# отдавали файл с Windows-переводами строк.
+*.bat -text
+*.cmd -text
+*.sh text eol=lf

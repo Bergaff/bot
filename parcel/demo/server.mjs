@@ -321,6 +321,14 @@ server.listen(PORT, HOST, () => {
   console.log(`  ADMIN_API_TOKEN=${ADMIN_TOKEN}  INGEST_TOKEN=${INGEST_TOKEN}`);
   console.log(`  зеркало t.me/s/: http://127.0.0.1:${PORT}/mirror/s/durov`);
   console.log(`  настоящий API: /api/admin/watch-chats, /api/admin/collect, /api/admin/collect/status, /api/ingest`);
+  console.log('');
+  console.log('  Что вписать в попап расширения (иконка «попутка. — сбор объявлений»):');
+  console.log(`    serverUrl : http://127.0.0.1:${PORT}`);
+  console.log(`    token     : ${INGEST_TOKEN}`);
+  console.log(`    админка   : http://localhost:${PORT}/  → вкладка «очередь», бейдж «расширение»`);
+  console.log('  Порядок: chrome://extensions → Режим разработчика → «Загрузить распакованное»');
+  console.log('  → папка extension/ → открыть https://web.telegram.org → «Диагностика вкладки».');
+  console.log('  Подробно и с таблицей ошибок: docs/try-it.md');
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
