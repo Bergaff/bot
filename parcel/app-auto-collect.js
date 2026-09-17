@@ -391,6 +391,7 @@ function extClientsList(clients) {
           ' · отсеяно ' + (counters.skipped || 0) + ' · прогонов ' + (counters.runs || 0) +
           ' · ошибок разметки ' + (counters.errors || 0),
       }),
+      c.walk ? extWalkBlock(c.walk) : null,
       c.status ? el('p', { class: 'muted', text: 'состояние: ' + c.status }) : null,
       c.error ? el('p', { class: 'empty-note', text: '⚠ ' + c.error }) : null,
       c.unreadable
@@ -398,6 +399,32 @@ function extClientsList(clients) {
         : null,
     ].filter(Boolean));
   }));
+}
+
+/** Как идёт автообход: где клиент сейчас, куда пойдёт дальше и чем кончились переходы. */
+function extWalkBlock(walk) {
+  const w = walk || {};
+  const head = w.on
+    ? 'автообход: ' + (w.switching ? 'открываю «' + w.switching + '»' : 'сейчас «' + (w.current || '—') + '»') +
+      ' → дальше «' + (w.next || '—') + '»' +
+      (w.nextInSec ? ', переход через ' + w.nextInSec + ' с' : '') +
+      ' · переходов за час ' + (w.switchesHour || 0) + ' из ' + (w.switchesLimit || 0) +
+      ' · в плане ' + (w.plan || 0)
+    : 'автообход выключен (пользователь открывает чаты сам)';
+  const log = Array.isArray(w.log) ? w.log : [];
+  return el('div', {}, [
+    el('p', { class: 'muted', text: head }),
+    w.note ? el('p', { class: 'muted', text: w.note }) : null,
+    log.length
+      ? el('details', { class: 'admin-report' }, [
+          el('summary', { text: 'Переходы обхода: последние ' + log.length }),
+          el('ul', { class: 'muted' }, log.slice(0, 8).map((r) => el('li', {
+            text: (r.ok === false ? '✖ не открылся ' : r.ok ? '✔ открыт ' : '→ переход ') +
+              (r.label || '—') + (r.note ? ' — ' + r.note : ''),
+          }))),
+        ])
+      : null,
+  ].filter(Boolean));
 }
 
 /** Форма белого списка для расширения: чаты и румы, интервал, пауза. */
@@ -414,6 +441,19 @@ function extConfigForm(config) {
   const paused = el('input', { type: 'checkbox' });
   paused.checked = Boolean(config && config.paused);
 
+  // автообход: расширение само открывает чаты и румы из списка со случайными паузами
+  const num = (value, fallback, min, max) => {
+    const input = el('input', { class: 'q', type: 'number', min, max, step: 1 });
+    input.value = String(value == null ? fallback : value);
+    return input;
+  };
+  const autoWalk = el('input', { type: 'checkbox' });
+  autoWalk.checked = Boolean(config && config.autoWalk);
+  const walkReads = num(config && config.walkReadsPerChat, 2, 1, 20);
+  const walkMin = num(config && config.walkMinSec, 60, 10, 3600);
+  const walkMax = num(config && config.walkMaxSec, 240, 10, 7200);
+  const walkHour = num(config && config.walkMaxPerHour, 20, 1, 600);
+
   const save = el('button', {
     class: 'btn btn-ink', type: 'button', text: 'сохранить и передать расширению',
     onclick: async () => {
@@ -427,6 +467,11 @@ function extConfigForm(config) {
             whitelist,
             intervalSec: Number(interval.value) || 120,
             paused: paused.checked,
+            autoWalk: autoWalk.checked,
+            walkReadsPerChat: Number(walkReads.value) || 2,
+            walkMinSec: Number(walkMin.value) || 60,
+            walkMaxSec: Number(walkMax.value) || 240,
+            walkMaxPerHour: Number(walkHour.value) || 20,
           }),
         });
         if (!r.ok) {
@@ -435,6 +480,7 @@ function extConfigForm(config) {
         }
         toast('Передано расширению: ' + whitelist.length + ' записей в белом списке' +
           (paused.checked ? ', пауза включена' : '') +
+          (autoWalk.checked ? ', автообход включён' : '') +
           '. Подхватит в следующий проход (или кнопка «Настройки из панели» в попапе).');
         await renderAutoCollect();
       } catch (e) {
@@ -461,6 +507,22 @@ function extConfigForm(config) {
       el('label', { class: 'muted' }, [paused, el('span', { text: ' пауза' })]),
       save,
     ]),
+    el('div', { class: 'admin-card-actions' }, [
+      el('label', { class: 'muted' }, [autoWalk, el('span', { text: ' автообход чатов и румов' })]),
+      el('label', { class: 'muted', text: 'проходов на чат' }), walkReads,
+      el('label', { class: 'muted', text: 'пауза от, с' }), walkMin,
+      el('label', { class: 'muted', text: 'до, с' }), walkMax,
+      el('label', { class: 'muted', text: 'переходов в час' }), walkHour,
+    ]),
+    el('p', {
+      class: 'muted',
+      text: 'Автообход: клиент сам открывает чаты и румы по порядку белого списка — ' +
+        'прочитал «проходов на чат» раз, случайная пауза (от…до), следующий. Ничего не пишет и не ' +
+        'отправляет от имени аккаунта, только читает. Пока пользователь сам печатает или кликает ' +
+        'во вкладке, чат не переключается; по пределу переходов в час обход ждёт. Вкладка Telegram Web ' +
+        'должна быть открыта. Это автоматизация аккаунта — держите темп человеческим, а в идеале ' +
+        'используйте отдельный номер.',
+    }),
     config && config.updatedAt
       ? el('p', { class: 'muted', text: 'Настройки заданы ' + extAgo(config.updatedAt) + '.' })
       : el('p', { class: 'muted', text: 'Настройки из панели ещё не задавались — расширение работает по своему попапу.' }),

@@ -9,8 +9,12 @@
   const NS = 'poputchka';
   const $ = (id) => document.getElementById(id);
 
-  const FIELDS = ['serverUrl', 'token', 'intervalSec', 'batchSize', 'maxPerChat', 'maxAgeHours'];
-  const CHECKS = ['confirmMode', 'requireContact', 'paused'];
+  const FIELDS = [
+    'serverUrl', 'token', 'intervalSec', 'batchSize', 'maxPerChat', 'maxAgeHours',
+    // автообход: темп переходов между чатами и румами
+    'walkReadsPerChat', 'walkMinSec', 'walkMaxSec', 'walkMaxPerHour', 'walkIdleGuardSec',
+  ];
+  const CHECKS = ['confirmMode', 'requireContact', 'paused', 'autoWalk'];
 
   function show(kind, text) {
     const box = $('msg');
@@ -73,6 +77,10 @@
     if (urlProblem) { show('err', urlProblem); return; }
     if (!settings.token) { show('warn', 'Токен пустой: сервер ответит 401, сбор не пойдёт.'); }
     if (settings.whitelist.length === 0) { show('warn', 'Белый список пуст — сообщения не будут читаться вовсе.'); }
+    if (settings.autoWalk && settings.whitelist.length === 0) {
+      show('err', 'Автообход включён, но белый список пуст: расширению некуда переходить. Добавьте чаты или выключите обход.');
+      return;
+    }
 
     const saved = await chrome.storage.local.get(NS);
     await chrome.storage.local.set({
@@ -383,16 +391,73 @@
     }
   }
 
+  /**
+   * Автообход: где расширение сейчас, куда пойдёт дальше, сколько переходов
+   * сделал за час и чем кончился последний переход.
+   */
+  function renderWalk(st) {
+    const box = $('walk');
+    if (!box) return;
+    box.replaceChildren();
+    const w = (st && st.walk) || null;
+    if (!w || !w.on) {
+      if (w && w.log && w.log.length) {
+        box.append(mk('div', 'rec-head', 'Обход выключен — последние переходы'));
+        for (const rec of w.log.slice(0, 6)) box.append(walkRow(rec));
+      }
+      return;
+    }
+
+    box.append(mk('div', 'rec-head',
+      `Обход: ${w.current || '—'} → ${w.next || '—'} (проход ${w.reads}/${w.readsPerChat})`));
+
+    const rows = [
+      ['в плане чатов и румов', String(w.plan || 0)],
+      ['переход через', w.nextInSec ? w.nextInSec + ' с' : 'как дочитаю чат'],
+      ['переходов за час', `${w.switchesHour} из ${w.switchesLimit}`],
+    ];
+    if (w.switching) rows.push(['открываю сейчас', w.switching]);
+    const grid = mk('div', 'stats');
+    for (const [k, v] of rows) {
+      const row = document.createElement('div');
+      row.append(document.createElement('span'), document.createElement('span'));
+      row.firstChild.textContent = k;
+      row.lastChild.textContent = v;
+      grid.append(row);
+    }
+    box.append(grid);
+    if (w.note) box.append(mk('p', 'rec-why', w.note));
+
+    if (w.log && w.log.length) {
+      box.append(mk('div', 'rec-head', 'Последние переходы'));
+      for (const rec of w.log.slice(0, 8)) box.append(walkRow(rec));
+    }
+  }
+
+  function walkRow(rec) {
+    const row = mk('div', 'rec');
+    const top = mk('div', 'rec-top');
+    const cls = rec.ok === false ? 'badge' : (rec.ok ? 'badge ok' : 'badge sent');
+    const label = rec.ok === false ? '✖ не открылся' : (rec.ok ? '✔ открыт' : '→ переход');
+    top.append(mk('span', cls, label));
+    top.append(mk('span', 'rec-text', rec.label || '—'));
+    row.append(top);
+    if (rec.note) row.append(mk('div', 'rec-why', rec.note));
+    return row;
+  }
+
   /** Спросить состояние вкладки и показать счётчики + журнал разбора (без внедрения). */
   async function refreshState() {
     const res = await notifyTab({ type: 'pk:state' });
     if (!res || !res.state) {
       // вкладка не отвечает: не пугаем ошибкой при открытии попапа, но объясняем в журнале
       renderRecent(null, res && res.error ? res.error : null);
+      renderWalk(null);
       return;
     }
     renderStats(res.state.counters || {});
     renderRecent(res.state);
+    renderWalk(res.state);
     if (res.state.diagnostic && res.state.diagnostic.topicNote) show('warn', res.state.diagnostic.topicNote);
   }
 
@@ -404,6 +469,7 @@
     if (res.error) { show('warn', res.error); box.textContent = res.error; return; }
     box.textContent = res.diagnostic || JSON.stringify(res.state || {}, null, 2);
     renderRecent(res.state);
+    renderWalk(res.state);
     if (!(res.state && res.state.diagnostic && res.state.diagnostic.topicNote)) clearMsg();
   }
 
@@ -414,6 +480,7 @@
     const c = (res.state && res.state.counters) || {};
     renderStats(c);
     renderRecent(res.state);
+    renderWalk(res.state);
     show(res.state && res.state.error ? 'err' : 'ok',
       (res.state && res.state.status) || 'отправлено');
   }

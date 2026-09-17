@@ -531,9 +531,74 @@
     'about', 'privacy', 'chatlist', 'search', 'info', 'media', 'members', 'stickers',
   ];
 
+  /** Строки списка чатов слева: по ним автообход открывает чат кликом. */
+  const CHAT_ROW_SELECTORS = [
+    '.chatlist-chat',
+    '[class*="chatlist-chat"]',
+    '.chatlist a',
+    '[class*="chatlist"] [class*="peer-title"]',
+    '.sidebar [data-peer-id]',
+  ];
+
+  /** Имя внутри строки списка чатов. */
+  const ROW_TITLE_SELECTORS = [
+    '.peer-title',
+    '[class*="peer-title"]',
+    '.chatlist-chat-title',
+    '[class*="chat-title"]',
+  ];
+
+  function squashText(raw) {
+    return String(raw == null ? '' : raw).replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  /**
+   * Найти строку чата или рума в боковой панели — для автообхода, когда открыть
+   * чат по адресу нельзя (цель задана названием, либо клиент не понимает рум в адресе).
+   *
+   * Функция только ИЩЕТ узел: клик делает вызывающий. Читает он её так же, как
+   * читает сообщения, — ничего в разметку не пишет.
+   *
+   * `labels` — варианты имени (название рума, юзернейм, подпись цели): берём
+   * первое совпадение, полное или по включению.
+   */
+  function findChatRow(doc, labels) {
+    const wanted = (Array.isArray(labels) ? labels : [labels]).map(squashText).filter(Boolean);
+    if (!wanted.length) return null;
+    const rows = pickAll(doc, CHAT_ROW_SELECTORS).nodes || [];
+    for (const node of rows) {
+      const titleNode = node && typeof node.querySelector === 'function'
+        ? pickFirst(node, ROW_TITLE_SELECTORS)
+        : null;
+      const text = squashText(textOf(titleNode) || textOf(node));
+      if (!text) continue;
+      for (const w of wanted) {
+        if (text === w || text.includes(w) || w.includes(text)) return { node, title: text };
+      }
+    }
+    return null;
+  }
+
   function isReadable(doc) {
     const { nodes } = pickAll(doc, MESSAGE_CONTAINERS);
     return nodes.length > 0;
+  }
+
+  /**
+   * Отпечаток СОДЕРЖИМОГО ленты — без адреса вкладки: заголовок чата, имя рума
+   * из шапки, сколько сообщений видно и id первого/последнего.
+   *
+   * Нужен автообходу: мы меняем адрес сами, поэтому по адресу нельзя понять,
+   * открылся ли другой чат. Если отпечаток до и после перехода одинаковый —
+   * клиент остался на прежнем чате (нет доступа, рум не понял, страница
+   * зависла), и обход честно пишет «не открылся», а не перечитывает прежнее.
+   */
+  function contentFingerprint(doc) {
+    const info = readChatInfo(doc, null);
+    const { nodes } = pickAll(doc, MESSAGE_CONTAINERS);
+    const firstId = nodes.length ? messageIdFromNode(nodes[0]).id : null;
+    const lastId = nodes.length ? messageIdFromNode(nodes[nodes.length - 1]).id : null;
+    return [info.title || '', info.topicTitle || '', nodes.length, firstId, lastId].join('|');
   }
 
   return {
@@ -545,6 +610,10 @@
     CHAT_TITLE_SELECTORS,
     CHAT_USERNAME_SELECTORS,
     NON_CHAT_HASHES,
+    CHAT_ROW_SELECTORS,
+    ROW_TITLE_SELECTORS,
+    findChatRow,
+    squashText,
     textOf,
     attrOf,
     pickFirst,
@@ -557,5 +626,6 @@
     readChatInfo,
     harvest,
     isReadable,
+    contentFingerprint,
   };
 });

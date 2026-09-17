@@ -86,7 +86,7 @@ describe('проход по чату из белого списка', () => {
     expect(call.init.cache).toBe('no-store');
 
     const payload = b.lastPayload();
-    expect(payload.collector).toBe('tg-web-ext/1.0.0');
+    expect(payload.collector).toBe('tg-web-ext/1.0.4');
     expect(payload.dryRun).toBe(false);
     // болтовня (529) и пассажирская попутка (530) отсеяны ещё в вкладке
     expect(payload.messages.map((m: any) => m.messageId)).toEqual([528, 531]);

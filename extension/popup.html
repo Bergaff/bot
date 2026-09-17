@@ -89,6 +89,40 @@
     <div class="check"><input id="requireContact" type="checkbox"><label for="requireContact" style="margin:0">Слать только сообщения с контактом (телефон или @username)</label></div>
     <div class="check"><input id="paused" type="checkbox"><label for="paused" style="margin:0">Пауза (ничего не читать и не отправлять)</label></div>
 
+    <div class="check"><input id="autoWalk" type="checkbox"><label for="autoWalk" style="margin:0"><b>Обходить чаты и румы самому</b> (автопереходы по белому списку)</label></div>
+    <div class="row">
+      <div>
+        <label for="walkReadsPerChat">Проходов на чат</label>
+        <input id="walkReadsPerChat" type="number" min="1" max="20" step="1">
+      </div>
+      <div>
+        <label for="walkMinSec">Пауза от, с</label>
+        <input id="walkMinSec" type="number" min="10" max="3600" step="10">
+      </div>
+      <div>
+        <label for="walkMaxSec">Пауза до, с</label>
+        <input id="walkMaxSec" type="number" min="10" max="7200" step="10">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="walkMaxPerHour">Переходов в час, не более</label>
+        <input id="walkMaxPerHour" type="number" min="1" max="600" step="1">
+      </div>
+      <div>
+        <label for="walkIdleGuardSec">Не мешать мне, с</label>
+        <input id="walkIdleGuardSec" type="number" min="0" max="1800" step="5">
+      </div>
+    </div>
+    <p style="margin:3px 0 0;color:#64748b;font-size:11.5px">
+      Обход идёт по порядку записей белого списка: открыл чат/рум → прочитал «проходов на чат»
+      раз (с вашим интервалом опроса) → <b>случайная</b> пауза → следующий. Ничего не пишет,
+      не отправляет и не публикует от вашего имени — только открывает чат и читает.
+      Пока вы сами печатаете или кликаете во вкладке, чат не переключается
+      («не мешать мне»), а по достижении предела переходов в час обход ждёт.
+      Вкладка Telegram Web должна оставаться открытой.
+    </p>
+
     <div class="btns">
       <button id="save" class="primary">Сохранить</button>
       <button id="selfcheck" class="primary">Самопроверка</button>
@@ -103,6 +137,7 @@
     <div id="msg"></div>
 
     <div class="stats" id="stats"></div>
+    <div id="walk"></div>
     <div id="recent"></div>
     <pre id="diag" hidden></pre>
 
@@ -137,6 +172,17 @@
       Панель сервера видит это расширение как «подключённый аккаунт»: вкладка «чаты» →
       блок «Аккаунт Telegram (расширение)» — статус, текущий чат и рум, счётчики,
       белый список и пауза. Белый список, заданный в панели, имеет приоритет над локальным.
+    </div>
+
+    <div class="note">
+      <b>Про автообход честно.</b> Переключение чатов — это уже автоматизация вашего аккаунта:
+      правила Telegram такое не приветствуют, и формально риск ограничений есть (практически
+      обход неотличим от чтения чатов руками: редкие случайные паузы, только чтение, ничего не
+      отправляется). Чтобы риск был минимальным: держите «переходов в час» небольшим (20–30),
+      паузу — от минуты, и лучше заведите <u>отдельный</u> аккаунт (вторая SIM) и войдите им в
+      эти чаты в отдельном профиле браузера — тогда автоматизация вообще не касается вашего
+      основного номера. Выключается мгновенно: чекбокс «Обходить чаты и румы самому»,
+      кнопка «Обход: выключить» в панели вкладки или «Пауза».
     </div>
 
     <div class="note">

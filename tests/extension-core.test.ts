@@ -104,9 +104,10 @@ describe('белый список чатов: всё остальное не ч�
   it('ссылка, @username и название — три способа задать чат', () => {
     expect(core.normalizeWhitelist(['https://t.me/s/drivers_pl_by', '@Drivers_PL_BY', 'Водители Польша–Беларусь']))
       .toEqual([
-        { kind: 'username', value: 'drivers_pl_by' },
-        { kind: 'username', value: 'drivers_pl_by' },
-        { kind: 'title', value: 'водители польша-беларусь' },
+        // raw — исходная строка записи: по ней автообход подписывает цель в журнале
+        { kind: 'username', value: 'drivers_pl_by', raw: 'https://t.me/s/drivers_pl_by' },
+        { kind: 'username', value: 'drivers_pl_by', raw: '@Drivers_PL_BY' },
+        { kind: 'title', value: 'водители польша-беларусь', raw: 'Водители Польша–Беларусь' },
       ]);
   });
 
@@ -423,6 +424,23 @@ describe('счётчики по ответу сервера', () => {
 
   it('в локальный лог идут обработанные сообщения, кроме invalid (их можно переслать)', () => {
     expect(core.summarizeResponse(body).sentKeys).toEqual(['web:a:1', 'web:a:2', 'web:a:3']);
+  });
+
+  it('ответ без results не повод слать тот же батч снова (важно для автообхода)', () => {
+    const batch = [
+      { chatId: 'web:travelersminsk', messageId: 713464 },
+      { chatId: 'web:belgranica', messageId: 528 },
+    ];
+    // сервер принял запрос (2xx), но разбора по сообщениям не прислал
+    expect(core.summarizeResponse({ ok: true, summary: {}, results: [] }, batch).sentKeys)
+      .toEqual(['web:travelersminsk:713464', 'web:belgranica:528']);
+    expect(core.summarizeResponse(null, batch).sentKeys).toEqual(['web:travelersminsk:713464', 'web:belgranica:528']);
+    // то, что сервер назвал invalid, остаётся на повтор
+    expect(core.summarizeResponse(body, batch.concat([{ chatId: 'web:a', messageId: 4 }])).sentKeys)
+      .toEqual(['web:a:1', 'web:a:2', 'web:a:3', 'web:travelersminsk:713464', 'web:belgranica:528']);
+    // уже перечисленные сервером ключи не дублируются
+    expect(core.summarizeResponse(body, [{ chatId: 'web:a', messageId: 1 }]).sentKeys)
+      .toEqual(['web:a:1', 'web:a:2', 'web:a:3']);
   });
 
   it('пустой или битый ответ не роняет клиент', () => {

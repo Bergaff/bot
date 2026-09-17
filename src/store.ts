@@ -759,6 +759,24 @@ export interface ExtensionChatRef {
   at?: string | null;
 }
 
+/** Как идёт автообход чатов (расширение само переключает чаты и румы). */
+export interface ExtensionWalkRef {
+  on?: boolean;
+  /** сколько чатов и румов в плане */
+  plan?: number | null;
+  /** где сейчас и куда дальше */
+  current?: string | null;
+  next?: string | null;
+  /** через сколько секунд переход (0 — как дочитает чат) */
+  nextInSec?: number | null;
+  /** сколько переходов сделал за последний час и какой предел */
+  switchesHour?: number | null;
+  switchesLimit?: number | null;
+  note?: string | null;
+  /** последние переходы: цель, открылся ли, чем кончилось */
+  log?: Array<{ at: string; label: string; ok: boolean | null; note: string }>;
+}
+
 /** Один подключённый браузер с расширением. */
 export interface ExtensionClient {
   clientId: string;
@@ -774,14 +792,33 @@ export interface ExtensionClient {
   whitelist?: string[];
   intervalSec?: number;
   paused?: boolean;
+  walk?: ExtensionWalkRef | null;
 }
 
 /** Настройки, которые панель отдаёт расширению. */
 export interface ExtensionConfig {
-  /** Чаты и румы: 'Граница', 't.me/granica_es', 'Граница :: Очередь BY-PL', 'Граница :: 7'. */
+  /**
+   * Чаты и румы: 'Граница', 't.me/granica_es', 'Граница :: Очередь BY-PL',
+   * 'Граница :: 7' или ссылка на рум 't.me/travelersminsk/91529'.
+   */
   whitelist: string[];
   intervalSec: number | null;
   paused: boolean | null;
+  /**
+   * Автообход: расширение само открывает чаты и румы из белого списка
+   * со случайными паузами (null — не трогаем локальную настройку клиента).
+   */
+  autoWalk?: boolean | null;
+  /** сколько проходов прочитать в чате, прежде чем уйти дальше */
+  walkReadsPerChat?: number | null;
+  /** случайная пауза перед переходом: от… */
+  walkMinSec?: number | null;
+  /** …до */
+  walkMaxSec?: number | null;
+  /** предел переходов в час */
+  walkMaxPerHour?: number | null;
+  /** не переключать чат, пока пользователь сам работает во вкладке (с) */
+  walkIdleGuardSec?: number | null;
   updatedAt: string;
 }
 
@@ -819,10 +856,27 @@ export function normalizeExtensionConfig(raw: unknown): ExtensionConfig | null {
   const intervalSec = rawInterval != null && Number.isFinite(rawInterval)
     ? Math.min(600, Math.max(60, Math.round(rawInterval)))
     : null;
+
+  // Автообход: те же границы, что и у клиента (extension/core.js withDefaults) —
+  // панель не должна уметь задать темп, который клиент сочтёт безумным.
+  const num = (v: unknown, min: number, max: number): number | null => {
+    if (v == null || v === '') return null;
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : null;
+  };
+  const walkMinSec = num(src.walkMinSec, 10, 3600);
+  const walkMaxSec = num(src.walkMaxSec, 10, 7200);
   return {
     whitelist,
     intervalSec,
     paused: typeof src.paused === 'boolean' ? src.paused : null,
+    autoWalk: typeof src.autoWalk === 'boolean' ? src.autoWalk : null,
+    walkReadsPerChat: num(src.walkReadsPerChat, 1, 20),
+    walkMinSec,
+    // «до» не может быть меньше «от»
+    walkMaxSec: walkMinSec != null && walkMaxSec != null && walkMaxSec < walkMinSec ? walkMinSec : walkMaxSec,
+    walkMaxPerHour: num(src.walkMaxPerHour, 1, 600),
+    walkIdleGuardSec: num(src.walkIdleGuardSec, 0, 1800),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -836,6 +890,35 @@ export async function putExtensionConfig(env: Env, raw: unknown): Promise<Extens
   if (!cfg) return null;
   await env.KV.put(EXT_CONFIG_KEY, JSON.stringify(cfg));
   return cfg;
+}
+
+/** Состояние автообхода из отметки расширения (только известные поля, обрезанные). */
+function walkOf(raw: unknown): ExtensionWalkRef | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const w = raw as Record<string, unknown>;
+  const n = (v: unknown): number | null => (Number.isFinite(Number(v)) ? Number(v) : null);
+  const log = Array.isArray(w.log)
+    ? w.log.slice(0, 12).map((item) => {
+        const r = (item ?? {}) as Record<string, unknown>;
+        return {
+          at: strOrNull(r.at, 40) ?? '',
+          label: strOrNull(r.label, 120) ?? '',
+          ok: typeof r.ok === 'boolean' ? r.ok : null,
+          note: strOrNull(r.note, 200) ?? '',
+        };
+      })
+    : [];
+  return {
+    on: typeof w.on === 'boolean' ? w.on : false,
+    plan: n(w.plan),
+    current: strOrNull(w.current, 160),
+    next: strOrNull(w.next, 160),
+    nextInSec: n(w.nextInSec),
+    switchesHour: n(w.switchesHour),
+    switchesLimit: n(w.switchesLimit),
+    note: strOrNull(w.note, 300),
+    log,
+  };
 }
 
 /** Записать отметку расширения («аккаунт подключён, вижу такой-то чат»). */
@@ -873,6 +956,7 @@ export async function recordExtensionClient(env: Env, raw: unknown): Promise<Ext
     whitelist: Array.isArray(src.whitelist) ? src.whitelist.map((x) => String(x).slice(0, 200)).slice(0, 50) : [],
     intervalSec: Number.isFinite(Number(src.intervalSec)) ? Number(src.intervalSec) : undefined,
     paused: typeof src.paused === 'boolean' ? src.paused : undefined,
+    walk: walkOf(src.walk),
   };
 
   const map = (await kvGetJson<Record<string, ExtensionClient>>(env, EXT_CLIENTS_KEY)) ?? {};

@@ -737,8 +737,71 @@ describe('панель как пульт расширения', () => {
     await ui.click(ui.buttonByText('сохранить и передать расширению', box));
 
     const put = ui.requests.find((r) => r.method === 'PUT' && r.path === '/api/admin/extension/config');
-    expect(put?.body).toEqual({ whitelist: ['Граница :: Очередь BY-PL', 'Граница :: 7'], intervalSec: 90, paused: true });
+    // темп автообхода уходит вместе с белым списком (тут — значения по умолчанию)
+    expect(put?.body).toEqual({
+      whitelist: ['Граница :: Очередь BY-PL', 'Граница :: 7'],
+      intervalSec: 90,
+      paused: true,
+      autoWalk: false,
+      walkReadsPerChat: 2,
+      walkMinSec: 60,
+      walkMaxSec: 240,
+      walkMaxPerHour: 20,
+    });
     expect(ui.toasts.join(' | ')).toContain('Передано расширению: 2 записей');
+  });
+
+  it('автообход: панель задаёт темп и видит, где клиент сейчас и куда пойдёт', async () => {
+    const ui = createAdminUi({
+      extension: {
+        clients: [{
+          ...EXT_CLIENT,
+          walk: {
+            on: true, plan: 8, current: 'travelersminsk/91529', next: 'belgranica/174591',
+            nextInSec: 95, switchesHour: 6, switchesLimit: 20,
+            note: 'Пауза перед переходом: 95 с (дальше «belgranica/174591»).',
+            log: [
+              { at: '2026-09-17T10:00:00.000Z', label: 'granica_es', ok: true, note: 'открыт' },
+              { at: '2026-09-17T09:58:00.000Z', label: 'travelersminsk/1', ok: false, note: 'не открылся за 15 с — пропускаю' },
+            ],
+          },
+        }],
+        config: {
+          whitelist: ['t.me/granica_es'], autoWalk: true, walkReadsPerChat: 3,
+          walkMinSec: 90, walkMaxSec: 300, walkMaxPerHour: 12, updatedAt: '2026-09-17T08:00:00.000Z',
+        },
+        ingestEnabled: true,
+      },
+    });
+    const box = await renderBlock(ui);
+
+    // карточка клиента: где обход сейчас
+    expect(box.textContent).toContain('автообход: сейчас «travelersminsk/91529» → дальше «belgranica/174591»');
+    expect(box.textContent).toContain('переход через 95 с');
+    expect(box.textContent).toContain('переходов за час 6 из 20');
+    expect(box.textContent).toContain('Переходы обхода: последние 2');
+    expect(box.textContent).toContain('✔ открыт granica_es');
+    expect(box.textContent).toContain('✖ не открылся travelersminsk/1');
+
+    // форма подхватила темп из настроек панели
+    const inputs = queryAll(box, 'input');
+    const autoWalk = inputs.find((i: any) => i.attrs?.type === 'checkbox' && i.checked === true);
+    expect(autoWalk, 'чекбокс автообхода не включён').toBeTruthy();
+
+    await ui.click(ui.buttonByText('сохранить и передать расширению', box));
+    const put = ui.requests.find((r) => r.method === 'PUT' && r.path === '/api/admin/extension/config');
+    expect(put?.body).toMatchObject({
+      autoWalk: true, walkReadsPerChat: 3, walkMinSec: 90, walkMaxSec: 300, walkMaxPerHour: 12,
+    });
+    expect(ui.toasts.join(' | ')).toContain('автообход включён');
+  });
+
+  it('обход выключен — панель так и пишет, а не молчит', async () => {
+    const ui = createAdminUi({
+      extension: { clients: [{ ...EXT_CLIENT, walk: { on: false } }], config: null, ingestEnabled: true },
+    });
+    const box = await renderBlock(ui);
+    expect(box.textContent).toContain('автообход выключен (пользователь открывает чаты сам)');
   });
 
   it('журнал приёма: ссылка на сообщение, заявка это или дубль', async () => {

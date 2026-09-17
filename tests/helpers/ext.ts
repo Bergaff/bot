@@ -52,6 +52,56 @@ export interface ExtSettings {
   whitelist: string[];
   maxAgeHours: number;
   requireContact: boolean;
+  /** Автообход: расширение само открывает чаты и румы из белого списка. */
+  autoWalk: boolean;
+  /** Сколько проходов чтения сделать в чате, прежде чем идти дальше. */
+  walkReadsPerChat: number;
+  /** Случайная пауза перед переходом, секунд (от…до). */
+  walkMinSec: number;
+  walkMaxSec: number;
+  /** Предел переходов в час. */
+  walkMaxPerHour: number;
+  /** Пока пользователь сам во вкладке — чат не переключаем (секунд тишины). */
+  walkIdleGuardSec: number;
+}
+
+/** Цель обхода: запись белого списка, в которую расширение откроет вкладку. */
+export interface WalkTarget {
+  /** Как запись выглядела в белом списке. */
+  raw: string;
+  /** Короткое имя для журнала и панели: «travelersminsk/91529». */
+  label: string;
+  kind: 'username' | 'title' | 'peer';
+  value: string;
+  topicId: number | null;
+  topic: string | null;
+  topicStrict: boolean;
+  chatKey: string | null;
+}
+
+/** Что обход решил на этом такте. */
+export interface WalkDecision {
+  action: 'off' | 'idle' | 'wait' | 'wait-load' | 'navigate' | 'read';
+  reason?: string;
+  target?: WalkTarget | null;
+  from?: WalkTarget | null;
+  index?: number;
+  reads?: number;
+  waitSec?: number;
+  switchesHour?: number;
+  note?: string;
+}
+
+/** Состояние обхода для чистого расчёта решения (без DOM и таймеров). */
+export interface WalkStateInput {
+  plan: WalkTarget[];
+  index: number;
+  reads: number;
+  nextAt: number;
+  switching: boolean;
+  switches: number[];
+  lastUserActivity: number;
+  now: number;
 }
 
 export interface DetectVerdict {
@@ -135,10 +185,33 @@ export interface CoreApi {
   classifyStatus: (status: number) => string;
   buildPayload: (messages: any[], opts?: { collector?: string; dryRun?: boolean }) => any;
   toPayloadMessage: (raw: any, settings?: Partial<ExtSettings>) => PayloadMessage;
-  summarizeResponse: (body: any) => IngestSummary & { sentKeys: string[] };
+  /**
+   * Разбор ответа /api/ingest. `batch` — что мы сами отправили: даже если сервер
+   * не прислал results, эти сообщения повторно не уйдут (кроме помеченных invalid).
+   */
+  summarizeResponse: (body: any, batch?: Array<{ chatId: string; messageId: number }>) => IngestSummary & { sentKeys: string[] };
   mergeCounters: (a: any, b: any) => any;
   pruneSentLog: (keys: string[], limit?: number) => string[];
   diagnostic: (report: any) => string;
+  /* --- автообход чатов и румов --- */
+  /** План обхода из белого списка: порядок сохранён, повторы схлопнуты. */
+  walkTargets: (whitelist: unknown) => WalkTarget[];
+  /** Какой это клиент Telegram Web: 'k' | 'a' | 'z' | null. */
+  clientFlavor: (location: any) => string | null;
+  /** Адрес вкладки для цели (или null — тогда открываем кликом по списку чатов). */
+  walkHashFor: (target: WalkTarget | null | undefined, location: any) => string | null;
+  /** Случайная пауза перед переходом, мс. */
+  walkPauseMs: (minSec: number, maxSec: number, rand?: () => number) => number;
+  /** Отметки переходов за последний час. */
+  walkSwitchesInHour: (stamps: number[] | null | undefined, now?: number) => number[];
+  /** Индекс цели, которая сейчас открыта (-1, если это не из плана). */
+  walkIndexForChat: (plan: WalkTarget[], chat: ChatRef | null) => number;
+  /** Следующая цель перехода, минуя те, что в этом круге не открылись. */
+  walkNextIndex: (plan: WalkTarget[], from: number, failed?: string[] | null) => number;
+  /** Тот ли чат/рум открылся после перехода. */
+  walkTargetMatches: (target: WalkTarget | null | undefined, chat: ChatRef | null) => boolean;
+  /** Чистое решение: читать, переходить или подождать. */
+  walkDecision: (input: WalkStateInput, settings: Partial<ExtSettings>) => WalkDecision;
 }
 
 export interface DomApi {
@@ -147,6 +220,9 @@ export interface DomApi {
   AUTHOR_SELECTORS: string[];
   DATE_SELECTORS: string[];
   ID_ATTRS: string[];
+  CHAT_ROW_SELECTORS: string[];
+  ROW_TITLE_SELECTORS: string[];
+  NON_CHAT_HASHES: string[];
   textOf: (node: any) => string;
   attrOf: (node: any, names: string[]) => string | null;
   messageIdFromNode: (node: any) => { id: number | null; source: string };
@@ -157,6 +233,12 @@ export interface DomApi {
   readChatInfo: (doc: any, location: any) => ChatRef;
   harvest: (doc: any, opts?: { limit?: number; now?: number; root?: any }) => HarvestReport;
   isReadable: (doc: any) => boolean;
+  /** Текст в одну строку, в нижнем регистре — для сравнения имён чатов. */
+  squashText: (raw: unknown) => string;
+  /** Строка чата/рума в боковом списке: { node, title } или null. Только поиск, клик делает вызывающий. */
+  findChatRow: (doc: any, labels: unknown) => { node: any; title: string } | null;
+  /** Отпечаток содержимого ленты (без адреса вкладки) — для проверки перехода. */
+  contentFingerprint: (doc: any) => string;
 }
 
 export const core = nodeRequire('../../extension/core.js') as CoreApi;

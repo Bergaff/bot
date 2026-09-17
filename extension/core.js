@@ -24,7 +24,7 @@
   'use strict';
 
   /** Версия клиента — уходит в поле collector (ТЗ п. 4.3). */
-  const COLLECTOR = 'tg-web-ext/1.0.0';
+  const COLLECTOR = 'tg-web-ext/1.0.4';
 
   /** Настройки по умолчанию. Всё хранится в chrome.storage / localStorage. */
   const DEFAULT_SETTINGS = {
@@ -48,6 +48,20 @@
     maxAgeHours: 72,
     /** Отправлять только сообщения с контактом (телефон/@username) */
     requireContact: false,
+
+    /* Автообход: расширение само открывает чаты и румы из белого списка.
+       По умолчанию ВЫКЛЮЧЕН — это уже автоматизация аккаунта (см. walkDecision). */
+    autoWalk: false,
+    /** Сколько проходов прочитать в одном чате, прежде чем уйти дальше */
+    walkReadsPerChat: 2,
+    /** Случайная пауза перед переходом: от… */
+    walkMinSec: 60,
+    /** …до (пауза каждый раз разная — как у человека) */
+    walkMaxSec: 240,
+    /** Предел переходов в час: защита от «слишком бодрого» обхода */
+    walkMaxPerHour: 20,
+    /** Не переключать чат, пока пользователь сам печатает/кликает (0 — не ждать) */
+    walkIdleGuardSec: 45,
     /** Служебный лог отправленного (ключи chatId:messageId), хранится отдельно */
   };
 
@@ -95,6 +109,13 @@
     s.confirmMode = s.confirmMode !== false;
     s.paused = s.paused === true;
     s.requireContact = s.requireContact === true;
+    s.autoWalk = s.autoWalk === true;
+    s.walkReadsPerChat = clamp(Math.round(Number(s.walkReadsPerChat) || DEFAULT_SETTINGS.walkReadsPerChat), 1, 20);
+    s.walkMinSec = clamp(Math.round(Number(s.walkMinSec) || DEFAULT_SETTINGS.walkMinSec), 10, 3600);
+    s.walkMaxSec = clamp(Math.round(Number(s.walkMaxSec) || DEFAULT_SETTINGS.walkMaxSec), 10, 7200);
+    if (s.walkMaxSec < s.walkMinSec) s.walkMaxSec = s.walkMinSec;
+    s.walkMaxPerHour = clamp(Math.round(Number(s.walkMaxPerHour) || DEFAULT_SETTINGS.walkMaxPerHour), 1, 600);
+    s.walkIdleGuardSec = clamp(Math.round(Number(s.walkIdleGuardSec) || 0), 0, 1800);
     s.whitelist = Array.isArray(s.whitelist) ? s.whitelist.filter((x) => typeof x === 'string' && x.trim()) : [];
     s.serverUrl = String(s.serverUrl || '').trim().replace(/\/+$/, '');
     s.token = String(s.token || '').trim();
@@ -156,12 +177,13 @@
     const parts = value.split(/\s*(?:::|>>)\s*/);
     const base = normalizeChatPart((parts[0] || '').trim());
     if (!base) return null;
+    base.raw = String(raw).trim();
     const topicPart = (parts[1] || '').trim();
     if (!topicPart) return base;
     if (/^\d{1,12}$/.test(topicPart)) {
-      return Object.assign(base, { topicId: Number(topicPart), topic: null, topicStrict: true });
+      return Object.assign(base, { topicId: Number(topicPart), topic: null, topicStrict: true, raw: raw });
     }
-    return Object.assign(base, { topic: squashTitle(topicPart), topicId: null, topicStrict: true });
+    return Object.assign(base, { topic: squashTitle(topicPart), topicId: null, topicStrict: true, raw: raw });
   }
 
   /**
@@ -589,20 +611,39 @@
   }
 
   /** Счётчики по ответу сервера: что добавляем в локальный лог и в статистику. */
-  function summarizeResponse(body) {
+  function summarizeResponse(body, batch) {
     const out = { received: 0, created: 0, duplicate: 0, skipped: 0, invalid: 0, listings: 0, sentKeys: [] };
-    if (!body || typeof body !== 'object') return out;
-    const s = body.summary || {};
-    out.received = Number(s.received || 0);
-    out.created = Number(s.created || 0);
-    out.duplicate = Number(s.duplicate || 0);
-    out.skipped = Number(s.skipped || 0);
-    out.invalid = Number(s.invalid || 0);
-    out.listings = Number(s.listings || 0);
-    for (const r of body.results || []) {
-      if (!r || !r.chatId) continue;
-      // duplicate/created/skipped — сообщение обработано, повторно слать не нужно
-      if (r.status !== 'invalid' && r.messageId) out.sentKeys.push(sentKey(r.chatId, r.messageId));
+    const rejected = {};
+    if (body && typeof body === 'object') {
+      const s = body.summary || {};
+      out.received = Number(s.received || 0);
+      out.created = Number(s.created || 0);
+      out.duplicate = Number(s.duplicate || 0);
+      out.skipped = Number(s.skipped || 0);
+      out.invalid = Number(s.invalid || 0);
+      out.listings = Number(s.listings || 0);
+      for (const r of body.results || []) {
+        if (!r || !r.chatId) continue;
+        if (r.status === 'invalid') {
+          // такое сообщение сервер не принял — оставляем его на повтор
+          if (r.messageId) rejected[sentKey(r.chatId, r.messageId)] = true;
+          continue;
+        }
+        // duplicate/created/skipped — сообщение обработано, повторно слать не нужно
+        if (r.messageId) out.sentKeys.push(sentKey(r.chatId, r.messageId));
+      }
+    }
+    /*
+     * Страховка от повторов. Ответ без results (старая версия сервера, прокси,
+     * пустое тело) не повод слать тот же батч каждый проход: что отправили сами
+     * и сервер принял (2xx), то считаем обработанным. Исключение — сообщения,
+     * которые сервер прямо назвал invalid.
+     */
+    for (const m of (batch || [])) {
+      if (!m || m.chatId == null || m.messageId == null) continue;
+      const key = sentKey(m.chatId, m.messageId);
+      if (rejected[key] || out.sentKeys.indexOf(key) !== -1) continue;
+      out.sentKeys.push(key);
     }
     return out;
   }
@@ -667,6 +708,218 @@
   /* ---------------------------------------------------------------- */
 
   /** Короткий отчёт «что вижу в вкладке» — для попапа и отладки разметки. */
+  /* ---------------------------------------------------------------- */
+  /* Автообход чатов и румов                                           */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * План обхода — цели из белого списка, по порядку записей.
+   *
+   * Цель описывает, КАК её открыть: юзернейм/peer-id (переход по адресу, как если
+   * бы пользователь сам вставил ссылку) или только название (тогда остаётся клик
+   * по строке в боковой панели — см. dom.findChatRow).
+   */
+  function walkTargets(whitelist) {
+    const seen = {};
+    const out = [];
+    for (const entry of normalizeWhitelist(whitelist)) {
+      // «Граница :: Очередь BY-PL»: имя рума нужно, чтобы найти строку в списке
+      const key = entry.kind + ':' + entry.value + ':' + (entry.topicId || '') + ':' + (entry.topic || '');
+      if (seen[key]) continue;
+      seen[key] = true;
+      const label = entry.kind === 'peer'
+        ? 'приватный чат ' + entry.value + (entry.topicId ? ', рум ' + entry.topicId : '')
+        : (entry.value + (entry.topicId ? '/' + entry.topicId : '') + (entry.topic ? ' :: ' + entry.topic : ''));
+      out.push({
+        raw: entry.raw || label,
+        label,
+        kind: entry.kind,
+        value: entry.value,
+        topicId: entry.topicId != null ? entry.topicId : null,
+        topic: entry.topic || null,
+        /** строгая запись: нужен именно этот рум, а не весь чат */
+        topicStrict: entry.topicStrict !== false || entry.topicId == null ? true : false,
+        chatKey: entry.kind === 'peer' ? 'ext:' + entry.value : (entry.kind === 'username' ? 'web:' + entry.value : null),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Какой клиент Telegram Web открыт: от этого зависит форма адреса.
+   * null — это вообще не Telegram Web (тогда обход адрес не трогает).
+   */
+  function clientFlavor(location) {
+    const href = String((location && location.href) || '');
+    if (!/web\.telegram\.org\//i.test(href)) return null;
+    if (/web\.telegram\.org\/a\//i.test(href)) return 'a';
+    if (/web\.telegram\.org\/z\//i.test(href)) return 'z';
+    return 'k';
+  }
+
+  /**
+   * Адрес (hash), по которому клиент откроет цель — как если бы пользователь
+   * сам перешёл по ссылке. null, если по адресу открыть нельзя (цель задана
+   * только названием) — тогда нужен клик по строке боковой панели.
+   *
+   * Web K:  #<username>[/<рум>]            #-100<id>[/<рум>]
+   * Web A/Z: #/im?p=@<username>            #/im?p=g<id>[_<рум>]
+   */
+  function walkHashFor(target, location) {
+    if (!target) return null;
+    const flavor = clientFlavor(location);
+    if (!flavor) return null;   // не клиент Telegram Web — адрес не переписываем
+    const topic = target.topicId != null ? target.topicId : null;
+
+    if (target.kind === 'username') {
+      if (flavor === 'k') return '#' + target.value + (topic ? '/' + topic : '');
+      // Web A/Z юзернейм понимает, а вот рум по адресу в них не открывается
+      return topic ? null : '#/im?p=@' + target.value;
+    }
+    if (target.kind === 'peer') {
+      const digits = String(target.value).replace(/^-100/, '');
+      if (flavor === 'k') return '#' + target.value + (topic ? '/' + topic : '');
+      return '#/im?p=g' + digits + (topic ? '_' + topic : '');
+    }
+    return null;   // цель задана названием — только клик по списку чатов
+  }
+
+  /** Случайная пауза между переходами (мс): каждый раз разная. */
+  function walkPauseMs(minSec, maxSec, rand) {
+    const lo = Math.max(1, Number(minSec) || 60);
+    const hi = Math.max(lo, Number(maxSec) || lo);
+    const r = typeof rand === 'function' ? rand() : Math.random();
+    return Math.round((lo + (hi - lo) * r) * 1000);
+  }
+
+  /** Переходы за последний час (с одновременной обрезкой старых отметок). */
+  function walkSwitchesInHour(stamps, now) {
+    const from = (now || Date.now()) - 3600 * 1000;
+    return (stamps || []).filter((t) => Number(t) > from);
+  }
+
+  /**
+   * Какую цель плана мы сейчас читаем: если пользователь открыл чат руками,
+   * обход продолжается с него, а не «сначала». -1 — открытый чат не из плана.
+   */
+  function walkIndexForChat(plan, chat) {
+    const key = chatKeyOf(chat);
+    if (!key) return -1;
+    const topicId = chat && chat.topicId != null && chat.topicId !== '' ? Number(chat.topicId) : null;
+    let sameChat = -1;
+    for (let i = 0; i < (plan || []).length; i++) {
+      const t = plan[i];
+      if (t.chatKey !== key) continue;
+      if (t.topicId == null) { if (sameChat < 0) sameChat = i; continue; }
+      if (t.topicId === topicId) return i;
+      if (sameChat < 0) sameChat = i;
+    }
+    // открытый чат показал КОНКРЕТНЫЙ рум, которого в плане нет — это не наша цель;
+    // «примерно тот же чат» годится, только когда рум не прочитался вовсе
+    return topicId == null ? sameChat : -1;
+  }
+
+  /**
+   * Куда идти дальше: следующая по порядку цель, которую в этом круге не
+   * провалили. Если не открылось всё (нет входа в аккаунт, разметка не читается),
+   * список проваленных сбрасывается и обход пробует снова — с теми же паузами.
+   */
+  function walkNextIndex(plan, from, failed) {
+    const list = plan || [];
+    const n = list.length;
+    if (!n) return 0;
+    const bad = {};
+    for (const label of (failed || [])) bad[label] = true;
+    for (let step = 1; step <= n; step++) {
+      const i = (((from + step) % n) + n) % n;
+      if (!bad[list[i].label]) return i;
+    }
+    return (((from + 1) % n) + n) % n;
+  }
+
+  /**
+   * Открыт ли сейчас чат/рум, соответствующий цели обхода.
+   *
+   * Для цели с румом достаточно и того, что клиент показывает заголовок темы,
+   * но не отдал её id (см. adoptTopicFromWhitelist) — иначе обход вечно считал бы
+   * переход неудачным и дёргал вкладку.
+   */
+  function walkTargetMatches(target, chat) {
+    if (!target || !chat) return false;
+    const key = chatKeyOf(chat);
+
+    if (target.chatKey) {
+      if (key !== target.chatKey) return false;
+      if (target.topicId == null) return true;
+      const topicId = chat.topicId != null && chat.topicId !== '' ? Number(chat.topicId) : null;
+      if (topicId === target.topicId) return true;
+      return topicId == null && topicCandidates(chat).length > 0;
+    }
+
+    // цель задана названием (запись «Граница :: Очередь BY-PL») — сравниваем тексты
+    const wanted = squashTitle(target.topic || target.value);
+    if (!wanted) return false;
+    const titles = chatTitleCandidates(chat).concat(topicCandidates(chat));
+    return titles.some((t) => t === wanted || t.includes(wanted) || wanted.includes(t));
+  }
+
+  /**
+   * Решение одного такта обхода — вся логика «читать / ждать / переходить» здесь,
+   * чистой функцией (так её можно проверить тестами без браузера).
+   *
+   * Ограничения, которые делают обход похожим на человека и не дают ему
+   * разогнаться: случайная пауза перед каждым переходом, предел переходов в час,
+   * запрет переключать чат, пока пользователь сам печатает или кликает, и
+   * несколько проходов чтения на одном чате (не «пролистнуть и убежать»).
+   */
+  function walkDecision(input, settings) {
+    const s = settings || {};
+    const now = input.now || Date.now();
+    const plan = input.plan || [];
+    if (!s.autoWalk) return { action: 'off' };
+    if (plan.length === 0) return { action: 'idle', reason: 'empty', note: 'Белый список пуст — обходить нечего.' };
+    if (input.switching) {
+      return { action: 'wait-load', target: plan[input.index] || plan[0], reason: 'load', note: 'Открываю чат, жду пока дорисуется…' };
+    }
+
+    const index = Number.isInteger(input.index) && input.index >= 0 && input.index < plan.length ? input.index : 0;
+    const target = plan[index];
+    const next = (index + 1) % plan.length;
+
+    const nextAt = Number(input.nextAt) || 0;
+    if (nextAt > now) {
+      return {
+        action: 'wait', reason: 'pause', target, waitSec: Math.ceil((nextAt - now) / 1000),
+        note: 'Пауза перед переходом: ' + Math.ceil((nextAt - now) / 1000) + ' с (дальше «' + (plan[next] || target).label + '»).',
+      };
+    }
+    const guardMs = (Number(s.walkIdleGuardSec) || 0) * 1000;
+    const idleFor = input.lastUserActivity ? now - Number(input.lastUserActivity) : Infinity;
+    if (guardMs > 0 && idleFor < guardMs) {
+      return {
+        action: 'wait', reason: 'user', target,
+        note: 'Вы сами работаете во вкладке — чат не переключаю ещё ' + Math.ceil((guardMs - idleFor) / 1000) + ' с.',
+      };
+    }
+    const stamps = walkSwitchesInHour(input.switches, now);
+    const limit = Number(s.walkMaxPerHour) || DEFAULT_SETTINGS.walkMaxPerHour;
+    if (stamps.length >= limit) {
+      return {
+        action: 'wait', reason: 'limit', target, switchesHour: stamps.length,
+        note: 'Предел переходов в час (' + limit + ') достигнут — обход подождёт.',
+      };
+    }
+    const reads = Number(input.reads) || 0;
+    const readsPerChat = Number(s.walkReadsPerChat) || DEFAULT_SETTINGS.walkReadsPerChat;
+    if (reads >= readsPerChat) {
+      return {
+        action: 'navigate', target: plan[next], from: target, index: next, switchesHour: stamps.length,
+        note: 'Перехожу в «' + plan[next].label + '».',
+      };
+    }
+    return { action: 'read', target, reads, reason: 'read', note: 'Читаю «' + target.label + '» (проход ' + (reads + 1) + ' из ' + readsPerChat + ').' };
+  }
+
   /** Как подписать вердикт по сообщению в панели и в диагностике. */
   const VERDICT_LABELS = {
     listing: '🟢 объявление',
@@ -757,6 +1010,15 @@
     adoptTopicFromWhitelist,
     chatTitleCandidates,
     topicCandidates,
+    walkTargets,
+    walkHashFor,
+    walkPauseMs,
+    walkSwitchesInHour,
+    walkIndexForChat,
+    walkNextIndex,
+    walkTargetMatches,
+    walkDecision,
+    clientFlavor,
     VERDICT_LABELS,
     REASON_LABELS,
     explainReason,

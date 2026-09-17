@@ -108,6 +108,116 @@ describe('панель как пульт расширения', () => {
     expect(normalizeExtensionConfig(null)).toBeNull();
   });
 
+  it('панель задаёт темп автообхода, расширение забирает его вместе с белым списком', async () => {
+    const put = await req('/api/admin/extension/config', {
+      method: 'PUT',
+      admin: true,
+      body: {
+        whitelist: ['t.me/travelersminsk/91529', 't.me/belgranica', 't.me/granica_es'],
+        intervalSec: 90,
+        paused: false,
+        autoWalk: true,
+        walkReadsPerChat: 3,
+        walkMinSec: 90,
+        walkMaxSec: 300,
+        walkMaxPerHour: 12,
+      },
+    });
+    expect(put.status).toBe(200);
+    const saved = ((await put.json()) as { config: Record<string, any> }).config;
+    expect(saved.autoWalk).toBe(true);
+    expect(saved.walkReadsPerChat).toBe(3);
+    expect(saved.walkMinSec).toBe(90);
+    expect(saved.walkMaxSec).toBe(300);
+    expect(saved.walkMaxPerHour).toBe(12);
+
+    // расширение получает их одним запросом (вместе с ответом на отметку)
+    const hb = await req('/api/extension/heartbeat', { method: 'POST', body: { clientId: 'client-walk' } });
+    const cfg = ((await hb.json()) as { config: Record<string, any> }).config;
+    expect(cfg.autoWalk).toBe(true);
+    expect(cfg.walkMinSec).toBe(90);
+    expect(cfg.walkMaxSec).toBe(300);
+  });
+
+  it('автообход по умолчанию выключен: панель должна включить его явно', async () => {
+    const put = await req('/api/admin/extension/config', {
+      method: 'PUT', admin: true, body: { whitelist: ['t.me/granica_es'] },
+    });
+    expect(((await put.json()) as { config: Record<string, any> }).config.autoWalk).toBeNull();
+    expect(normalizeExtensionConfig({ whitelist: ['t.me/granica_es'] })?.autoWalk).toBeNull();
+  });
+
+  it('темп обхода зажимается в безопасные границы (нельзя задать гонку)', () => {
+    const cfg = normalizeExtensionConfig({
+      whitelist: ['t.me/granica_es'],
+      autoWalk: 'да',                    // не булево — игнорируем
+      walkReadsPerChat: 500,             // слишком много проходов
+      walkMinSec: 1,                     // слишком частые переходы
+      walkMaxSec: 0,
+      walkMaxPerHour: 100000,
+      walkIdleGuardSec: -5,
+    })!;
+    expect(cfg.autoWalk).toBeNull();
+    expect(cfg.walkReadsPerChat).toBe(20);
+    expect(cfg.walkMinSec).toBe(10);
+    expect(cfg.walkMaxSec).toBe(10);
+    expect(cfg.walkMaxPerHour).toBe(600);
+    expect(cfg.walkIdleGuardSec).toBe(0);
+
+    // «до» меньше «от» — поднимаем до «от»: пауза не может быть отрицательной
+    expect(normalizeExtensionConfig({ whitelist: [], walkMinSec: 300, walkMaxSec: 60 })?.walkMaxSec).toBe(300);
+    // мусор вместо чисел — null (клиент возьмёт свои значения по умолчанию)
+    expect(normalizeExtensionConfig({ whitelist: [], walkMinSec: 'быстро' })?.walkMinSec).toBeNull();
+  });
+
+  it('отметка несёт, где автообход сейчас: цель, пауза, переходы и их исход', async () => {
+    const hb = await req('/api/extension/heartbeat', {
+      method: 'POST',
+      body: {
+        clientId: 'client-walk-2',
+        collector: 'tg-web-ext/1.0.4',
+        at: new Date(NOW).toISOString(),
+        status: 'Открываю «belgranica/174591»…',
+        chat: { chatId: 'web:travelersminsk', title: 'Посылки и попутчики', topicId: 91529, whitelisted: true },
+        counters: { found: 30, sent: 12, created: 9, duplicate: 3 },
+        walk: {
+          on: true,
+          plan: 8,
+          current: 'travelersminsk/91529',
+          next: 'belgranica/174591',
+          nextInSec: 95,
+          switchesHour: 6,
+          switchesLimit: 20,
+          note: 'Пауза перед переходом: 95 с.',
+          log: [
+            { at: '2026-09-17T10:00:00.000Z', label: 'granica_es', ok: true, note: 'открыт' },
+            { at: '2026-09-17T09:58:00.000Z', label: 'travelersminsk/1', ok: false, note: 'не открылся за 15 с — пропускаю' },
+          ],
+        },
+      },
+    });
+    expect(hb.status).toBe(200);
+
+    const ext = (await (await req('/api/admin/extension', { admin: true })).json()) as {
+      clients: Array<Record<string, any>>;
+    };
+    const walk = ext.clients[0]!.walk;
+    expect(walk).toMatchObject({
+      on: true, plan: 8, current: 'travelersminsk/91529', next: 'belgranica/174591',
+      nextInSec: 95, switchesHour: 6, switchesLimit: 20,
+    });
+    expect(walk.log).toHaveLength(2);
+    expect(walk.log[1]).toMatchObject({ label: 'travelersminsk/1', ok: false });
+  });
+
+  it('отметка без обхода — walk пустой, панель пишет «обход выключен»', async () => {
+    await req('/api/extension/heartbeat', { method: 'POST', body: { clientId: 'client-nowalk' } });
+    const ext = (await (await req('/api/admin/extension', { admin: true })).json()) as {
+      clients: Array<Record<string, any>>;
+    };
+    expect(ext.clients[0]!.walk).toBeNull();
+  });
+
   it('отметка «аккаунт подключён»: панель видит чат, рум, счётчики и состояние', async () => {
     const hb = await req('/api/extension/heartbeat', {
       method: 'POST',

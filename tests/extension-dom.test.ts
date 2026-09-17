@@ -394,7 +394,7 @@ describe('сквозной проход: DOM → детект → тело за�
     expect(candidates.map((m) => m.messageId)).toEqual([528, 531]);
 
     const payload = core.buildPayload(candidates, { collector: core.COLLECTOR });
-    expect(payload).toMatchObject({ collector: 'tg-web-ext/1.0.0', dryRun: false });
+    expect(payload).toMatchObject({ collector: 'tg-web-ext/1.0.4', dryRun: false });
     expect(payload.messages[0]).toEqual({
       chatId: 'web:drivers_pl_by',
       messageId: 528,

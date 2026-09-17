@@ -247,4 +247,21 @@ export class FakeDocument {
 
   querySelector(selector: string): FakeNode | null { return this.body.querySelector(selector); }
   querySelectorAll(selector: string): FakeNode[] { return this.body.querySelectorAll(selector); }
+
+  /** Обработчики событий документа: автообход слушает keydown/mousedown/wheel/touchstart. */
+  readonly docHandlers: Record<string, Array<(ev: any) => void>> = {};
+
+  addEventListener(type: string, fn: (ev: any) => void, _opts?: unknown): void {
+    (this.docHandlers[type] ||= []).push(fn);
+  }
+
+  removeEventListener(type: string, fn: (ev: any) => void): void {
+    this.docHandlers[type] = (this.docHandlers[type] || []).filter((f) => f !== fn);
+  }
+
+  /** «Пользователь тронул вкладку» — так тесты проверяют, что обход не вырывает чат. */
+  userEvent(type = 'mousedown'): void {
+    const ev = { type, target: this.body, preventDefault() {}, stopPropagation() {} };
+    for (const fn of this.docHandlers[type] || []) fn(ev);
+  }
 }

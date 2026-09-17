@@ -37,6 +37,17 @@ export interface FakeBrowserOptions {
   settings?: Record<string, unknown>;
   /** заранее записанные счётчики/лог отправленного */
   stored?: Record<string, unknown>;
+  /**
+   * «Страницы» для автообхода: hash → дерево чата. Когда контент-скрипт меняет
+   * `location.hash` (переход в следующий чат/рум), тело документа подменяется —
+   * так в мини-браузере проверяется обход без настоящего Telegram.
+   */
+  pages?: Record<string, FakeNode>;
+  /**
+   * Виртуальное время: `Date.now()` внутри вкладки начинается с настоящего и
+   * двигается методом `advance()`. Нужно, чтобы не ждать реальные паузы обхода.
+   */
+  fakeClock?: boolean;
 }
 
 export class FakeBrowser {
@@ -51,6 +62,12 @@ export class FakeBrowser {
   /** какие таймеры сняты (clearInterval) — по ним видно, что старый экземпляр остановлен */
   readonly cleared: number[] = [];
   readonly timeouts: Array<() => void> = [];
+  /** какие адреса вкладки установил контент-скрипт (переходы автообхода) */
+  readonly hashChanges: string[] = [];
+  /** страницы по хэшу: подменяем тело документа при переходе */
+  private readonly pages: Record<string, FakeNode>;
+  /** виртуальное «сейчас» внутри вкладки */
+  nowMs = Date.now();
   private response: FakeResponse = { status: 200, body: { ok: true, summary: {}, results: [] } };
   private readonly doc: FakeDocument;
   private readonly store = new Map<string, string>();
@@ -58,6 +75,7 @@ export class FakeBrowser {
   constructor(opts: FakeBrowserOptions = {}) {
     const page = opts.page ?? defaultPage();
     this.doc = new FakeDocument(page);
+    this.pages = opts.pages ?? {};
 
     const url = new URL(opts.url ?? 'https://web.telegram.org/k/#@drivers_pl_by');
     const self = this;
@@ -91,20 +109,60 @@ export class FakeBrowser {
           json: async () => JSON.parse(text),
         };
       },
+      // Виртуальные часы: контент-скрипт живёт по ним, иначе тесты ждали бы
+      // настоящие паузы автообхода (60–240 с).
+      Date: opts.fakeClock
+        ? class FakeDate extends Date {
+            constructor(...args: unknown[]) {
+              super(...(args.length ? (args as [any]) : ([self.nowMs] as [any])));
+            }
+            static now(): number { return self.nowMs; }
+          }
+        : Date,
       setInterval: (fn: () => void, ms?: number) => {
         self.intervals.push(fn);
         self.intervalMs.push(Number(ms) || 0);
         return self.intervals.length;
       },
       clearInterval: (id: unknown) => { self.cleared.push(Number(id)); },
-      setTimeout: (fn: () => void) => { self.timeouts.push(fn); return self.timeouts.length; },
+      setTimeout: (fn: () => void, ms?: number) => {
+        self.timeouts.push(fn);
+        const id = self.timeouts.length;
+        const delay = Number(ms) || 0;
+        // Короткие таймеры (опрос «дорисовался ли чат» при автообходе, сброс флага
+        // своего клика) срабатывают сами — тест не должен ждать полсекунды.
+        // Длинные остаются ручными: первый проход (4 с) вызывает firstTick().
+        if (delay > 0 && delay <= 2000) {
+          setTimeout(() => {
+            // с виртуальными часами таймер ещё и двигает время вкладки:
+            // ожидание «дорисовался ли чат» (30 × 500 мс) должно когда-то кончиться
+            if (opts.fakeClock) self.nowMs += delay;
+            fn();
+          }, 0);
+        }
+        return id;
+      },
     });
 
-    const win: Record<string, any> = {
-      location: { href: url.href, hash: url.hash, origin: url.origin },
-    };
+    // Адрес вкладки: запись в location.hash открывает «страницу» из opts.pages —
+    // так автообход переключает чаты и румы внутри мини-браузера.
+    const loc: Record<string, any> = { href: url.href, origin: url.origin };
+    let currentHash = url.hash;
+    Object.defineProperty(loc, 'hash', {
+      get: () => currentHash,
+      set: (raw: string) => {
+        const next = String(raw).startsWith('#') ? String(raw) : '#' + String(raw);
+        if (next === currentHash) return;
+        currentHash = next;
+        self.hashChanges.push(next);
+        loc.href = url.origin + url.pathname + next;
+        const page = self.pages[next] ?? self.pages[next.replace(/^#/, '')];
+        if (page) self.doc.body.replaceChildren(page);
+      },
+    });
+    const win: Record<string, any> = { location: loc };
     this.context.window = win;
-    this.context.location = win.location;
+    this.context.location = loc;
 
     // настройки «как из попапа»
     const saved = Object.assign({ settings: defaultSettings() }, opts.stored ?? {});
@@ -148,6 +206,18 @@ export class FakeBrowser {
     return (this.context.window as Record<string, any>).__poputchkaBoot;
   }
 
+  /** Пользователь печатает/кликает/крутит колесо во вкладке Telegram. */
+  userTouches(type: 'keydown' | 'mousedown' | 'wheel' | 'touchstart' = 'mousedown'): this {
+    this.doc.userEvent(type);
+    return this;
+  }
+
+  /** Двинуть виртуальное время вкладки вперёд (паузы автообхода). */
+  advance(ms: number): this { this.nowMs += ms; return this; }
+
+  /** Какой чат сейчас открыт (по адресу вкладки). */
+  get hash(): string { return (this.context.location as Record<string, any>).hash; }
+
   /** Проход по таймеру опроса. */
   async tick(): Promise<void> {
     const fn = this.intervals[this.intervals.length - 1];
@@ -183,6 +253,8 @@ export class FakeBrowser {
     sentKeys?: string[];
     /** Журнал разбора: каждое прочитанное сообщение, вердикт и ссылка на него. */
     recent?: Array<Record<string, any>>;
+    /** Где автообход остановился: индекс цели, переходы за час, журнал переходов. */
+    walk?: Record<string, any>;
     clientId?: string;
     alive?: { at?: number; ok?: boolean; error?: string | null; version?: string; url?: string | null; status?: string };
   } {
@@ -230,6 +302,12 @@ function defaultSettings(): Record<string, unknown> {
     whitelist: ['t.me/drivers_pl_by'],
     maxAgeHours: 72,
     requireContact: false,
+    autoWalk: false,
+    walkReadsPerChat: 2,
+    walkMinSec: 60,
+    walkMaxSec: 240,
+    walkMaxPerHour: 20,
+    walkIdleGuardSec: 45,
   };
 }
 

@@ -439,7 +439,8 @@ export function registerAdminCollectRoutes(app: Hono<{ Bindings: Env }>): void {
     if (!config) {
       return c.json({
         error: 'whitelist: нужен массив строк (или текст по строке на чат). ' +
-          'Примеры: «Граница», «t.me/granica_es», «Граница :: Очередь BY-PL», «Граница :: 7»',
+          'Примеры: «Граница», «t.me/granica_es», «Граница :: Очередь BY-PL», «Граница :: 7», ' +
+          'ссылка на рум «t.me/travelersminsk/91529», приватный чат «t.me/c/1234567890»',
       }, 400);
     }
     return c.json({ ok: true, config });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         попутка. — сбор объявлений из чатов Telegram Web
 // @namespace    https://github.com/Bergaff/bot
-// @version      1.0.3
+// @version      1.0.4
 // @description  Только чтение: находит объявления о передаче посылок в открытой вкладке Telegram Web и отправляет их на сервер попутки (POST /api/ingest). Ничего не публикует от вашего имени.
 // @match        https://web.telegram.org/*
 // @run-at       document-idle
@@ -24,10 +24,26 @@
  *                 'Граница :: Очередь BY-PL', 'Граница :: 7'],
  *     intervalSec: 120, batchSize: 20, maxPerChat: 30,
  *     confirmMode: true, paused: false, maxAgeHours: 72, requireContact: false,
+ *     // автообход: сам открывает чаты и румы из whitelist со случайными паузами
+ *     autoWalk: false, walkReadsPerChat: 2, walkMinSec: 60, walkMaxSec: 240,
+ *     walkMaxPerHour: 20, walkIdleGuardSec: 45,
  *   }}));
  *   location.reload();
  *
  * Счётчики и лог отправленного живут там же; панель — справа внизу вкладки.
+ *
+ * Версия 1.0.4: автообход чатов и румов. Расширение само открывает цели из
+ * белого списка (адресом вкладки, а если клиент его не понял — кликом по строке
+ * в списке чатов), читает их и идёт дальше по кругу. Темп человеческий: случайная
+ * пауза 60–240 с между переходами, 2 прохода на чат, не больше 20 переходов в час
+ * и «не мешать» — пока вы печатаете или кликаете во вкладке, чат не переключаем.
+ * Обход только читает: ничего не отправляет, не публикует и не печатает от вашего
+ * имени. Пауза и выключение — мгновенные (кнопка «Обход: выключить» в панели справа
+ * внизу или галочка в попапе). Если чат не открылся, обход пишет об этом в журнале
+ * и идёт дальше, а адрес вкладки возвращает прежний — иначе сообщения чужого чата
+ * ушли бы на сервер под неверным именем. По умолчанию автообход ВЫКЛЮЧЕН.
+ * Ещё: отправленные сообщения больше не повторяются, даже если сервер ответил без
+ * разбора по сообщениям (results) — важно, когда обход перечитывает чат по кругу.
  *
  * Версия 1.0.3: рум (топик) forum-чата можно задать ссылкой из Telegram
  * (t.me/<чат>/<рум> или t.me/<чат>/<рум>/<сообщение>); в панели справа внизу и в
@@ -82,7 +98,7 @@
   'use strict';
 
   /** Версия клиента — уходит в поле collector (ТЗ п. 4.3). */
-  const COLLECTOR = 'tg-web-ext/1.0.0';
+  const COLLECTOR = 'tg-web-ext/1.0.4';
 
   /** Настройки по умолчанию. Всё хранится в chrome.storage / localStorage. */
   const DEFAULT_SETTINGS = {
@@ -106,6 +122,20 @@
     maxAgeHours: 72,
     /** Отправлять только сообщения с контактом (телефон/@username) */
     requireContact: false,
+
+    /* Автообход: расширение само открывает чаты и румы из белого списка.
+       По умолчанию ВЫКЛЮЧЕН — это уже автоматизация аккаунта (см. walkDecision). */
+    autoWalk: false,
+    /** Сколько проходов прочитать в одном чате, прежде чем уйти дальше */
+    walkReadsPerChat: 2,
+    /** Случайная пауза перед переходом: от… */
+    walkMinSec: 60,
+    /** …до (пауза каждый раз разная — как у человека) */
+    walkMaxSec: 240,
+    /** Предел переходов в час: защита от «слишком бодрого» обхода */
+    walkMaxPerHour: 20,
+    /** Не переключать чат, пока пользователь сам печатает/кликает (0 — не ждать) */
+    walkIdleGuardSec: 45,
     /** Служебный лог отправленного (ключи chatId:messageId), хранится отдельно */
   };
 
@@ -153,6 +183,13 @@
     s.confirmMode = s.confirmMode !== false;
     s.paused = s.paused === true;
     s.requireContact = s.requireContact === true;
+    s.autoWalk = s.autoWalk === true;
+    s.walkReadsPerChat = clamp(Math.round(Number(s.walkReadsPerChat) || DEFAULT_SETTINGS.walkReadsPerChat), 1, 20);
+    s.walkMinSec = clamp(Math.round(Number(s.walkMinSec) || DEFAULT_SETTINGS.walkMinSec), 10, 3600);
+    s.walkMaxSec = clamp(Math.round(Number(s.walkMaxSec) || DEFAULT_SETTINGS.walkMaxSec), 10, 7200);
+    if (s.walkMaxSec < s.walkMinSec) s.walkMaxSec = s.walkMinSec;
+    s.walkMaxPerHour = clamp(Math.round(Number(s.walkMaxPerHour) || DEFAULT_SETTINGS.walkMaxPerHour), 1, 600);
+    s.walkIdleGuardSec = clamp(Math.round(Number(s.walkIdleGuardSec) || 0), 0, 1800);
     s.whitelist = Array.isArray(s.whitelist) ? s.whitelist.filter((x) => typeof x === 'string' && x.trim()) : [];
     s.serverUrl = String(s.serverUrl || '').trim().replace(/\/+$/, '');
     s.token = String(s.token || '').trim();
@@ -214,12 +251,13 @@
     const parts = value.split(/\s*(?:::|>>)\s*/);
     const base = normalizeChatPart((parts[0] || '').trim());
     if (!base) return null;
+    base.raw = String(raw).trim();
     const topicPart = (parts[1] || '').trim();
     if (!topicPart) return base;
     if (/^\d{1,12}$/.test(topicPart)) {
-      return Object.assign(base, { topicId: Number(topicPart), topic: null, topicStrict: true });
+      return Object.assign(base, { topicId: Number(topicPart), topic: null, topicStrict: true, raw: raw });
     }
-    return Object.assign(base, { topic: squashTitle(topicPart), topicId: null, topicStrict: true });
+    return Object.assign(base, { topic: squashTitle(topicPart), topicId: null, topicStrict: true, raw: raw });
   }
 
   /**
@@ -647,20 +685,39 @@
   }
 
   /** Счётчики по ответу сервера: что добавляем в локальный лог и в статистику. */
-  function summarizeResponse(body) {
+  function summarizeResponse(body, batch) {
     const out = { received: 0, created: 0, duplicate: 0, skipped: 0, invalid: 0, listings: 0, sentKeys: [] };
-    if (!body || typeof body !== 'object') return out;
-    const s = body.summary || {};
-    out.received = Number(s.received || 0);
-    out.created = Number(s.created || 0);
-    out.duplicate = Number(s.duplicate || 0);
-    out.skipped = Number(s.skipped || 0);
-    out.invalid = Number(s.invalid || 0);
-    out.listings = Number(s.listings || 0);
-    for (const r of body.results || []) {
-      if (!r || !r.chatId) continue;
-      // duplicate/created/skipped — сообщение обработано, повторно слать не нужно
-      if (r.status !== 'invalid' && r.messageId) out.sentKeys.push(sentKey(r.chatId, r.messageId));
+    const rejected = {};
+    if (body && typeof body === 'object') {
+      const s = body.summary || {};
+      out.received = Number(s.received || 0);
+      out.created = Number(s.created || 0);
+      out.duplicate = Number(s.duplicate || 0);
+      out.skipped = Number(s.skipped || 0);
+      out.invalid = Number(s.invalid || 0);
+      out.listings = Number(s.listings || 0);
+      for (const r of body.results || []) {
+        if (!r || !r.chatId) continue;
+        if (r.status === 'invalid') {
+          // такое сообщение сервер не принял — оставляем его на повтор
+          if (r.messageId) rejected[sentKey(r.chatId, r.messageId)] = true;
+          continue;
+        }
+        // duplicate/created/skipped — сообщение обработано, повторно слать не нужно
+        if (r.messageId) out.sentKeys.push(sentKey(r.chatId, r.messageId));
+      }
+    }
+    /*
+     * Страховка от повторов. Ответ без results (старая версия сервера, прокси,
+     * пустое тело) не повод слать тот же батч каждый проход: что отправили сами
+     * и сервер принял (2xx), то считаем обработанным. Исключение — сообщения,
+     * которые сервер прямо назвал invalid.
+     */
+    for (const m of (batch || [])) {
+      if (!m || m.chatId == null || m.messageId == null) continue;
+      const key = sentKey(m.chatId, m.messageId);
+      if (rejected[key] || out.sentKeys.indexOf(key) !== -1) continue;
+      out.sentKeys.push(key);
     }
     return out;
   }
@@ -725,6 +782,218 @@
   /* ---------------------------------------------------------------- */
 
   /** Короткий отчёт «что вижу в вкладке» — для попапа и отладки разметки. */
+  /* ---------------------------------------------------------------- */
+  /* Автообход чатов и румов                                           */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * План обхода — цели из белого списка, по порядку записей.
+   *
+   * Цель описывает, КАК её открыть: юзернейм/peer-id (переход по адресу, как если
+   * бы пользователь сам вставил ссылку) или только название (тогда остаётся клик
+   * по строке в боковой панели — см. dom.findChatRow).
+   */
+  function walkTargets(whitelist) {
+    const seen = {};
+    const out = [];
+    for (const entry of normalizeWhitelist(whitelist)) {
+      // «Граница :: Очередь BY-PL»: имя рума нужно, чтобы найти строку в списке
+      const key = entry.kind + ':' + entry.value + ':' + (entry.topicId || '') + ':' + (entry.topic || '');
+      if (seen[key]) continue;
+      seen[key] = true;
+      const label = entry.kind === 'peer'
+        ? 'приватный чат ' + entry.value + (entry.topicId ? ', рум ' + entry.topicId : '')
+        : (entry.value + (entry.topicId ? '/' + entry.topicId : '') + (entry.topic ? ' :: ' + entry.topic : ''));
+      out.push({
+        raw: entry.raw || label,
+        label,
+        kind: entry.kind,
+        value: entry.value,
+        topicId: entry.topicId != null ? entry.topicId : null,
+        topic: entry.topic || null,
+        /** строгая запись: нужен именно этот рум, а не весь чат */
+        topicStrict: entry.topicStrict !== false || entry.topicId == null ? true : false,
+        chatKey: entry.kind === 'peer' ? 'ext:' + entry.value : (entry.kind === 'username' ? 'web:' + entry.value : null),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Какой клиент Telegram Web открыт: от этого зависит форма адреса.
+   * null — это вообще не Telegram Web (тогда обход адрес не трогает).
+   */
+  function clientFlavor(location) {
+    const href = String((location && location.href) || '');
+    if (!/web\.telegram\.org\//i.test(href)) return null;
+    if (/web\.telegram\.org\/a\//i.test(href)) return 'a';
+    if (/web\.telegram\.org\/z\//i.test(href)) return 'z';
+    return 'k';
+  }
+
+  /**
+   * Адрес (hash), по которому клиент откроет цель — как если бы пользователь
+   * сам перешёл по ссылке. null, если по адресу открыть нельзя (цель задана
+   * только названием) — тогда нужен клик по строке боковой панели.
+   *
+   * Web K:  #<username>[/<рум>]            #-100<id>[/<рум>]
+   * Web A/Z: #/im?p=@<username>            #/im?p=g<id>[_<рум>]
+   */
+  function walkHashFor(target, location) {
+    if (!target) return null;
+    const flavor = clientFlavor(location);
+    if (!flavor) return null;   // не клиент Telegram Web — адрес не переписываем
+    const topic = target.topicId != null ? target.topicId : null;
+
+    if (target.kind === 'username') {
+      if (flavor === 'k') return '#' + target.value + (topic ? '/' + topic : '');
+      // Web A/Z юзернейм понимает, а вот рум по адресу в них не открывается
+      return topic ? null : '#/im?p=@' + target.value;
+    }
+    if (target.kind === 'peer') {
+      const digits = String(target.value).replace(/^-100/, '');
+      if (flavor === 'k') return '#' + target.value + (topic ? '/' + topic : '');
+      return '#/im?p=g' + digits + (topic ? '_' + topic : '');
+    }
+    return null;   // цель задана названием — только клик по списку чатов
+  }
+
+  /** Случайная пауза между переходами (мс): каждый раз разная. */
+  function walkPauseMs(minSec, maxSec, rand) {
+    const lo = Math.max(1, Number(minSec) || 60);
+    const hi = Math.max(lo, Number(maxSec) || lo);
+    const r = typeof rand === 'function' ? rand() : Math.random();
+    return Math.round((lo + (hi - lo) * r) * 1000);
+  }
+
+  /** Переходы за последний час (с одновременной обрезкой старых отметок). */
+  function walkSwitchesInHour(stamps, now) {
+    const from = (now || Date.now()) - 3600 * 1000;
+    return (stamps || []).filter((t) => Number(t) > from);
+  }
+
+  /**
+   * Какую цель плана мы сейчас читаем: если пользователь открыл чат руками,
+   * обход продолжается с него, а не «сначала». -1 — открытый чат не из плана.
+   */
+  function walkIndexForChat(plan, chat) {
+    const key = chatKeyOf(chat);
+    if (!key) return -1;
+    const topicId = chat && chat.topicId != null && chat.topicId !== '' ? Number(chat.topicId) : null;
+    let sameChat = -1;
+    for (let i = 0; i < (plan || []).length; i++) {
+      const t = plan[i];
+      if (t.chatKey !== key) continue;
+      if (t.topicId == null) { if (sameChat < 0) sameChat = i; continue; }
+      if (t.topicId === topicId) return i;
+      if (sameChat < 0) sameChat = i;
+    }
+    // открытый чат показал КОНКРЕТНЫЙ рум, которого в плане нет — это не наша цель;
+    // «примерно тот же чат» годится, только когда рум не прочитался вовсе
+    return topicId == null ? sameChat : -1;
+  }
+
+  /**
+   * Куда идти дальше: следующая по порядку цель, которую в этом круге не
+   * провалили. Если не открылось всё (нет входа в аккаунт, разметка не читается),
+   * список проваленных сбрасывается и обход пробует снова — с теми же паузами.
+   */
+  function walkNextIndex(plan, from, failed) {
+    const list = plan || [];
+    const n = list.length;
+    if (!n) return 0;
+    const bad = {};
+    for (const label of (failed || [])) bad[label] = true;
+    for (let step = 1; step <= n; step++) {
+      const i = (((from + step) % n) + n) % n;
+      if (!bad[list[i].label]) return i;
+    }
+    return (((from + 1) % n) + n) % n;
+  }
+
+  /**
+   * Открыт ли сейчас чат/рум, соответствующий цели обхода.
+   *
+   * Для цели с румом достаточно и того, что клиент показывает заголовок темы,
+   * но не отдал её id (см. adoptTopicFromWhitelist) — иначе обход вечно считал бы
+   * переход неудачным и дёргал вкладку.
+   */
+  function walkTargetMatches(target, chat) {
+    if (!target || !chat) return false;
+    const key = chatKeyOf(chat);
+
+    if (target.chatKey) {
+      if (key !== target.chatKey) return false;
+      if (target.topicId == null) return true;
+      const topicId = chat.topicId != null && chat.topicId !== '' ? Number(chat.topicId) : null;
+      if (topicId === target.topicId) return true;
+      return topicId == null && topicCandidates(chat).length > 0;
+    }
+
+    // цель задана названием (запись «Граница :: Очередь BY-PL») — сравниваем тексты
+    const wanted = squashTitle(target.topic || target.value);
+    if (!wanted) return false;
+    const titles = chatTitleCandidates(chat).concat(topicCandidates(chat));
+    return titles.some((t) => t === wanted || t.includes(wanted) || wanted.includes(t));
+  }
+
+  /**
+   * Решение одного такта обхода — вся логика «читать / ждать / переходить» здесь,
+   * чистой функцией (так её можно проверить тестами без браузера).
+   *
+   * Ограничения, которые делают обход похожим на человека и не дают ему
+   * разогнаться: случайная пауза перед каждым переходом, предел переходов в час,
+   * запрет переключать чат, пока пользователь сам печатает или кликает, и
+   * несколько проходов чтения на одном чате (не «пролистнуть и убежать»).
+   */
+  function walkDecision(input, settings) {
+    const s = settings || {};
+    const now = input.now || Date.now();
+    const plan = input.plan || [];
+    if (!s.autoWalk) return { action: 'off' };
+    if (plan.length === 0) return { action: 'idle', reason: 'empty', note: 'Белый список пуст — обходить нечего.' };
+    if (input.switching) {
+      return { action: 'wait-load', target: plan[input.index] || plan[0], reason: 'load', note: 'Открываю чат, жду пока дорисуется…' };
+    }
+
+    const index = Number.isInteger(input.index) && input.index >= 0 && input.index < plan.length ? input.index : 0;
+    const target = plan[index];
+    const next = (index + 1) % plan.length;
+
+    const nextAt = Number(input.nextAt) || 0;
+    if (nextAt > now) {
+      return {
+        action: 'wait', reason: 'pause', target, waitSec: Math.ceil((nextAt - now) / 1000),
+        note: 'Пауза перед переходом: ' + Math.ceil((nextAt - now) / 1000) + ' с (дальше «' + (plan[next] || target).label + '»).',
+      };
+    }
+    const guardMs = (Number(s.walkIdleGuardSec) || 0) * 1000;
+    const idleFor = input.lastUserActivity ? now - Number(input.lastUserActivity) : Infinity;
+    if (guardMs > 0 && idleFor < guardMs) {
+      return {
+        action: 'wait', reason: 'user', target,
+        note: 'Вы сами работаете во вкладке — чат не переключаю ещё ' + Math.ceil((guardMs - idleFor) / 1000) + ' с.',
+      };
+    }
+    const stamps = walkSwitchesInHour(input.switches, now);
+    const limit = Number(s.walkMaxPerHour) || DEFAULT_SETTINGS.walkMaxPerHour;
+    if (stamps.length >= limit) {
+      return {
+        action: 'wait', reason: 'limit', target, switchesHour: stamps.length,
+        note: 'Предел переходов в час (' + limit + ') достигнут — обход подождёт.',
+      };
+    }
+    const reads = Number(input.reads) || 0;
+    const readsPerChat = Number(s.walkReadsPerChat) || DEFAULT_SETTINGS.walkReadsPerChat;
+    if (reads >= readsPerChat) {
+      return {
+        action: 'navigate', target: plan[next], from: target, index: next, switchesHour: stamps.length,
+        note: 'Перехожу в «' + plan[next].label + '».',
+      };
+    }
+    return { action: 'read', target, reads, reason: 'read', note: 'Читаю «' + target.label + '» (проход ' + (reads + 1) + ' из ' + readsPerChat + ').' };
+  }
+
   /** Как подписать вердикт по сообщению в панели и в диагностике. */
   const VERDICT_LABELS = {
     listing: '🟢 объявление',
@@ -815,6 +1084,15 @@
     adoptTopicFromWhitelist,
     chatTitleCandidates,
     topicCandidates,
+    walkTargets,
+    walkHashFor,
+    walkPauseMs,
+    walkSwitchesInHour,
+    walkIndexForChat,
+    walkNextIndex,
+    walkTargetMatches,
+    walkDecision,
+    clientFlavor,
     VERDICT_LABELS,
     REASON_LABELS,
     explainReason,
@@ -1379,9 +1657,74 @@
     'about', 'privacy', 'chatlist', 'search', 'info', 'media', 'members', 'stickers',
   ];
 
+  /** Строки списка чатов слева: по ним автообход открывает чат кликом. */
+  const CHAT_ROW_SELECTORS = [
+    '.chatlist-chat',
+    '[class*="chatlist-chat"]',
+    '.chatlist a',
+    '[class*="chatlist"] [class*="peer-title"]',
+    '.sidebar [data-peer-id]',
+  ];
+
+  /** Имя внутри строки списка чатов. */
+  const ROW_TITLE_SELECTORS = [
+    '.peer-title',
+    '[class*="peer-title"]',
+    '.chatlist-chat-title',
+    '[class*="chat-title"]',
+  ];
+
+  function squashText(raw) {
+    return String(raw == null ? '' : raw).replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  /**
+   * Найти строку чата или рума в боковой панели — для автообхода, когда открыть
+   * чат по адресу нельзя (цель задана названием, либо клиент не понимает рум в адресе).
+   *
+   * Функция только ИЩЕТ узел: клик делает вызывающий. Читает он её так же, как
+   * читает сообщения, — ничего в разметку не пишет.
+   *
+   * `labels` — варианты имени (название рума, юзернейм, подпись цели): берём
+   * первое совпадение, полное или по включению.
+   */
+  function findChatRow(doc, labels) {
+    const wanted = (Array.isArray(labels) ? labels : [labels]).map(squashText).filter(Boolean);
+    if (!wanted.length) return null;
+    const rows = pickAll(doc, CHAT_ROW_SELECTORS).nodes || [];
+    for (const node of rows) {
+      const titleNode = node && typeof node.querySelector === 'function'
+        ? pickFirst(node, ROW_TITLE_SELECTORS)
+        : null;
+      const text = squashText(textOf(titleNode) || textOf(node));
+      if (!text) continue;
+      for (const w of wanted) {
+        if (text === w || text.includes(w) || w.includes(text)) return { node, title: text };
+      }
+    }
+    return null;
+  }
+
   function isReadable(doc) {
     const { nodes } = pickAll(doc, MESSAGE_CONTAINERS);
     return nodes.length > 0;
+  }
+
+  /**
+   * Отпечаток СОДЕРЖИМОГО ленты — без адреса вкладки: заголовок чата, имя рума
+   * из шапки, сколько сообщений видно и id первого/последнего.
+   *
+   * Нужен автообходу: мы меняем адрес сами, поэтому по адресу нельзя понять,
+   * открылся ли другой чат. Если отпечаток до и после перехода одинаковый —
+   * клиент остался на прежнем чате (нет доступа, рум не понял, страница
+   * зависла), и обход честно пишет «не открылся», а не перечитывает прежнее.
+   */
+  function contentFingerprint(doc) {
+    const info = readChatInfo(doc, null);
+    const { nodes } = pickAll(doc, MESSAGE_CONTAINERS);
+    const firstId = nodes.length ? messageIdFromNode(nodes[0]).id : null;
+    const lastId = nodes.length ? messageIdFromNode(nodes[nodes.length - 1]).id : null;
+    return [info.title || '', info.topicTitle || '', nodes.length, firstId, lastId].join('|');
   }
 
   return {
@@ -1393,6 +1736,10 @@
     CHAT_TITLE_SELECTORS,
     CHAT_USERNAME_SELECTORS,
     NON_CHAT_HASHES,
+    CHAT_ROW_SELECTORS,
+    ROW_TITLE_SELECTORS,
+    findChatRow,
+    squashText,
     textOf,
     attrOf,
     pickFirst,
@@ -1405,6 +1752,7 @@
     readChatInfo,
     harvest,
     isReadable,
+    contentFingerprint,
   };
 });
 
@@ -1448,7 +1796,7 @@
   /* Слушатель сообщений регистрируется ПЕРВЫМ делом: даже если что-то ниже
    * упадёт, попап получит ответ с текстом ошибки, а не «вкладка не отвечает». */
   const boot = {
-    version: '1.0.3',
+    version: '1.0.4',
     startedAt: Date.now(),
     ok: false,
     error: null,
@@ -1482,7 +1830,23 @@
     sentKeys: [],
     pending: [],          // найдено, но ждёт подтверждения (confirmMode)
     recent: [],           // журнал разбора: КАЖДОЕ просмотренное сообщение и вердикт
-    ui: { showRecent: true },
+    ui: { showRecent: true, showWalk: true },
+    // автообход: расширение само открывает чаты и румы из белого списка
+    walk: {
+      index: 0,             // какую цель плана читаем сейчас
+      reads: 0,             // сколько проходов прочитали в этом чате
+      nextAt: 0,            // когда переходить дальше (мс)
+      switching: null,      // цель, которую сейчас открываем
+      triedClick: false,    // адрес не сработал — пробовали ли клик по списку чатов
+      beforeFp: '',         // отпечаток чата ДО перехода: чтобы понять, что он правда сменился
+      switches: [],         // отметки переходов (лимит в час)
+      failed: [],           // цели, которые в этом круге не открылись
+      prevHash: '',         // адрес вкладки ДО перехода: возвращаемся, если не вышло
+      lastUserActivity: 0,  // пользователь печатает/кликает — чат не вырываем
+      ourAction: false,     // это наш клик, а не пользовательский
+      log: [],              // последние переходы
+      note: '',
+    },
     error: null,
     status: 'инициализация…',
     attempt: 0,
@@ -1546,6 +1910,12 @@
     state.counters = saved.counters || {};
     state.sentKeys = Array.isArray(saved.sentKeys) ? saved.sentKeys : [];
     state.recent = Array.isArray(saved.recent) ? saved.recent : [];
+    const w = saved.walk && typeof saved.walk === 'object' ? saved.walk : {};
+    state.walk.index = Number(w.index) || 0;
+    state.walk.reads = Number(w.reads) || 0;
+    state.walk.nextAt = Number(w.nextAt) || 0;
+    state.walk.switches = Array.isArray(w.switches) ? w.switches.map(Number).filter(Boolean) : [];
+    state.walk.log = Array.isArray(w.log) ? w.log : [];
     state.clientId = saved.clientId || newClientId();
   }
 
@@ -1564,6 +1934,15 @@
       sentKeys: core.pruneSentLog(state.sentKeys),
       // журнал разбора храним урезанным: он для наглядности, а не для истории
       recent: state.recent.slice(0, 40),
+      // обход: где мы в плане и какие переходы уже сделали (лимит в час и журнал
+      // переживают перезагрузку вкладки — иначе обход начинался бы заново и бодро)
+      walk: {
+        index: state.walk.index,
+        reads: state.walk.reads,
+        nextAt: state.walk.nextAt,
+        switches: core.walkSwitchesInHour(state.walk.switches, Date.now()),
+        log: state.walk.log.slice(0, 12),
+      },
       clientId: state.clientId,
       // отметка «я жив» — по ней попап объясняет «вкладка не отвечает»
       alive: {
@@ -1635,7 +2014,9 @@
         state.attempt = 0;
         state.backoffUntil = 0;
         state.error = null;
-        const sum = core.summarizeResponse(body);
+        // batch передаём, чтобы повторная отправка была исключена даже тогда,
+        // когда сервер не прислал разбора по сообщениям (results)
+        const sum = core.summarizeResponse(body, batch);
         state.counters = core.mergeCounters(state.counters, {
           sent: batch.length, received: sum.received, created: sum.created,
           duplicate: sum.duplicate, skipped: sum.skipped, invalid: sum.invalid,
@@ -1700,11 +2081,268 @@
     return rec;
   }
 
+  /** Состояние обхода наружу (попап и панель сервера): без внутренних таймеров. */
+  function walkPublic() {
+    const plan = state.walk.plan || core.walkTargets(state.settings.whitelist);
+    const target = plan[state.walk.index] || null;
+    const next = plan.length ? plan[(state.walk.index + 1) % plan.length] : null;
+    return {
+      on: state.settings.autoWalk === true,
+      plan: plan.length,
+      current: target ? target.label : null,
+      next: next ? next.label : null,
+      reads: state.walk.reads,
+      readsPerChat: state.settings.walkReadsPerChat,
+      nextInSec: state.walk.nextAt ? Math.max(0, Math.ceil((state.walk.nextAt - Date.now()) / 1000)) : 0,
+      switchesHour: core.walkSwitchesInHour(state.walk.switches, Date.now()).length,
+      switchesLimit: state.settings.walkMaxPerHour,
+      switching: state.walk.switching ? state.walk.switching.label : null,
+      note: state.walk.note || '',
+      log: state.walk.log.slice(0, 12),
+    };
+  }
+
   /** Отметить в журнале, какие сообщения ушли на сервер. */
   function markSent(batch) {
     const keys = new Set((batch || []).map((m) => core.sentKey(m.chatId, m.messageId)));
     for (const rec of state.recent) {
       if (keys.has(core.sentKey(rec.chatId, rec.messageId))) rec.sent = true;
+    }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Автообход чатов и румов                                           */
+  /*                                                                    */
+  /* Расширение открывает чаты из белого списка само: адресом вкладки     */
+  /* (как если бы пользователь вставил ссылку) или кликом по строке в     */
+  /* списке чатов. Ничего не отправляет, не публикует и не печатает —     */
+  /* только читает. Темп человеческий: случайная пауза перед каждым       */
+  /* переходом, несколько проходов на чат, предел переходов в час и       */
+  /* запрет переключать чат, пока пользователь сам работает во вкладке.   */
+  /* ---------------------------------------------------------------- */
+
+  /** Сколько записей журнала обхода держать. */
+  const WALK_LOG_MAX = 25;
+  /** Сколько ждём, пока клиент дорисует чат после перехода. */
+  const WALK_LOAD_TIMEOUT_MS = 15000;
+  /**
+   * И сколько раз при этом опрашиваем вкладку. Ограничение по числу опросов
+   * страхует от вечного ожидания, если часы вкладки стоят (фон, заморозка
+   * вкладки, отладка) — обход обязан когда-нибудь пойти дальше.
+   */
+  const WALK_LOAD_POLLS = 30;
+
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  /** Пользователь что-то делает во вкладке — обход подождёт и не вырвет чат. */
+  function markUserActivity() {
+    if (state.walk.ourAction) return;   // это наш собственный клик по списку чатов
+    state.walk.lastUserActivity = Date.now();
+  }
+
+  function watchUserActivity() {
+    if (typeof document.addEventListener !== 'function') return;
+    for (const type of ['keydown', 'mousedown', 'wheel', 'touchstart']) {
+      try { document.addEventListener(type, markUserActivity, { passive: true, capture: true }); } catch { /* не важно */ }
+    }
+  }
+
+  function clickRow(node) {
+    if (!node) return false;
+    if (typeof node.click === 'function') { node.click(); return true; }
+    if (typeof node.dispatch === 'function') { node.dispatch('click'); return true; }
+    return false;
+  }
+
+  function walkLog(target, ok, note) {
+    const rec = {
+      at: new Date().toISOString(),
+      label: target ? target.label : '—',
+      ok: ok === true ? true : (ok === false ? false : null),
+      note: note || '',
+    };
+    state.walk.log = [rec].concat(state.walk.log).slice(0, WALK_LOG_MAX);
+    return rec;
+  }
+
+  /**
+   * Открыть цель: сначала адресом (не трогает разметку и работает в Web K/A/Z),
+   * клик по списку чатов — запасной путь (цель задана названием, либо клиент не
+   * понимает рум в адресе).
+   */
+  function walkNavigate(target) {
+    if (!target) return { ok: false, how: null, error: 'нет цели' };
+    state.walk.prevHash = String((typeof location !== 'undefined' && location.hash) || '');
+    const hash = core.walkHashFor(target, typeof location !== 'undefined' ? location : null);
+    state.walk.beforeFp = chatFingerprint();
+    state.walk.ourAction = true;
+    // снимаем флаг не сразу: клиент дорисовывает чат асинхронно, и его внутренние
+    // клики/скроллы не должны считаться «пользователь работает»
+    setTimeout(() => { state.walk.ourAction = false; }, 1500);
+
+    if (hash) {
+      if (String((typeof location !== 'undefined' && location.hash) || '') === hash) {
+        return { ok: true, how: 'already' };
+      }
+      location.hash = hash;
+      return { ok: true, how: 'address', hash };
+    }
+    const row = dom.findChatRow(document, [target.topic, target.value, target.label]);
+    if (!row) return { ok: false, how: null, error: 'нет ни адреса, ни строки «' + target.label + '» в списке чатов' };
+    if (!clickRow(row.node)) return { ok: false, how: null, error: 'строка «' + row.title + '» не кликабельна' };
+    return { ok: true, how: 'click', title: row.title };
+  }
+
+  /**
+   * Отпечаток открытого чата. Нужен, чтобы отличить «клиент правда открыл другой
+   * чат» от «мы подставили адрес, а разметка осталась прежней» (нет доступа к
+   * чату, клиент не понял рум, страница зависла) — иначе обход молча перечитывал
+   * бы один и тот же чат, думая, что идёт по плану.
+   */
+  function chatFingerprint() {
+    return typeof dom.contentFingerprint === 'function' ? dom.contentFingerprint(document) : '';
+  }
+
+  /** Дождаться, пока клиент дорисует чат после перехода. */
+  async function walkWaitLoaded(target) {
+    const startedAt = Date.now();
+    let last = null;
+    let polls = 0;
+    while (Date.now() - startedAt < WALK_LOAD_TIMEOUT_MS && polls < WALK_LOAD_POLLS) {
+      polls++;
+      const chat = dom.readChatInfo(document, typeof window !== 'undefined' ? window.location : location);
+      last = chat;
+      if (core.walkTargetMatches(target, chat)
+        && (!state.walk.beforeFp || chatFingerprint() !== state.walk.beforeFp)) {
+        state.walk.beforeFp = '';
+        const topicId = chat.topicId != null && chat.topicId !== '' ? Number(chat.topicId) : null;
+        return { ok: true, chat, topicUnknown: target.topicId != null && topicId !== target.topicId };
+      }
+      await sleep(500);
+    }
+    return { ok: false, chat: last };
+  }
+
+  /**
+   * Один такт обхода: 'read' — читать текущий чат, 'skip' — сейчас не читаем
+   * (пауза, переход, ждём загрузки, лимит или пользователь работает).
+   */
+  async function walkStep() {
+    const plan = core.walkTargets(state.settings.whitelist);
+    state.walk.plan = plan;
+    if (!plan.length) {
+      state.walk.note = 'Белый список пуст — обходить нечего.';
+      return 'skip';
+    }
+
+    // переход сделан — ждём, пока чат дорисуется
+    if (state.walk.switching) {
+      const target = state.walk.switching;
+      const res = await walkWaitLoaded(target);
+      state.walk.switching = null;
+      state.walk.reads = 0;
+
+      if (res.ok) {
+        const i = core.walkIndexForChat(plan, res.chat);
+        if (i >= 0) state.walk.index = i;
+        state.walk.triedClick = false;
+        state.walk.failed = [];   // цель открылась — провалы этого круга забыты
+        walkLog(target, true, res.topicUnknown ? 'открыт (id рума клиент не отдал — беру из белого списка)' : 'открыт');
+        state.walk.note = 'Читаю «' + target.label + '».';
+        return 'read';
+      }
+      // адресом не вышло — один раз пробуем кликом по строке в списке чатов
+      if (!state.walk.triedClick) {
+        const row = dom.findChatRow(document, [target.topic, target.value, target.label]);
+        if (row) {
+          state.walk.triedClick = true;
+          state.walk.ourAction = true;
+          setTimeout(() => { state.walk.ourAction = false; }, 1500);
+          clickRow(row.node);
+          state.walk.switching = target;
+          walkLog(target, null, 'адрес не сработал — пробую кликом по «' + row.title + '»');
+          state.walk.note = 'Открываю «' + target.label + '» кликом по списку чатов…';
+          return 'skip';
+        }
+      }
+      state.walk.triedClick = false;
+      state.walk.beforeFp = '';
+      walkLog(target, false, 'не открылся за ' + Math.round(WALK_LOAD_TIMEOUT_MS / 1000) + ' с — пропускаю');
+      /*
+       * Клиент не переключился, а адрес вкладки мы уже поменяли: дальше читать
+       * нельзя — сообщения прежнего чата ушли бы на сервер под именем цели,
+       * которую мы не открыли (неверный chatId и неверные ссылки). Возвращаем
+       * прежний адрес и исключаем цель до конца круга.
+       */
+      const back = state.walk.prevHash;
+      if (back && String(location.hash || '') !== back) location.hash = back;
+      state.walk.failed = state.walk.failed.concat([target.label]);
+      if (state.walk.failed.length >= plan.length) state.walk.failed = [];
+      state.walk.index = core.walkNextIndex(plan, state.walk.index, state.walk.failed);
+      state.walk.reads = 0;
+      state.walk.nextAt = Date.now() + core.walkPauseMs(state.settings.walkMinSec, state.settings.walkMaxSec);
+      state.walk.note = '«' + target.label + '» не открылся — пропускаю, дальше по плану.';
+      return 'skip';
+    }
+
+    // пользователь сам открыл чат из плана — продолжаем обход с него, а не «с начала»
+    const chatNow = dom.readChatInfo(document, typeof window !== 'undefined' ? window.location : location);
+    const idxNow = core.walkIndexForChat(plan, chatNow);
+    if (idxNow >= 0 && idxNow !== state.walk.index) {
+      // пользователь сам открыл чат из плана — читаем его сразу, остаток паузы
+      // от предыдущего чата ждать не нужно
+      state.walk.index = idxNow;
+      state.walk.reads = 0;
+      state.walk.nextAt = 0;
+      state.walk.note = 'Вы открыли «' + plan[idxNow].label + '» — продолжаю обход с него.';
+    }
+
+    const decision = core.walkDecision({
+      plan,
+      index: state.walk.index,
+      reads: state.walk.reads,
+      nextAt: state.walk.nextAt,
+      switching: false,
+      switches: state.walk.switches,
+      lastUserActivity: state.walk.lastUserActivity,
+      now: Date.now(),
+    }, state.settings);
+    state.walk.note = decision.note || '';
+
+    if (decision.action === 'wait') {
+      // лимит переходов в час: откладываем на минуту и проверяем снова
+      if (decision.reason === 'limit') state.walk.nextAt = Date.now() + 60000;
+      return 'skip';
+    }
+    if (decision.action === 'navigate') {
+      const index = core.walkNextIndex(plan, state.walk.index, state.walk.failed);
+      const target = plan[index];
+      state.walk.triedClick = false;
+      const nav = walkNavigate(target);
+      state.walk.switches = core.walkSwitchesInHour(state.walk.switches, Date.now()).concat([Date.now()]);
+      state.walk.index = index;
+      state.walk.reads = 0;
+      state.walk.nextAt = 0;
+      if (nav.ok) {
+        state.walk.switching = target;
+        walkLog(target, null, 'перехожу (' + (nav.how === 'address' ? 'по адресу' : nav.how === 'click' ? 'клик по списку' : 'уже открыт') + ')');
+        state.walk.note = 'Открываю «' + target.label + '»…';
+      } else {
+        walkLog(target, false, nav.error);
+        state.walk.nextAt = Date.now() + core.walkPauseMs(state.settings.walkMinSec, state.settings.walkMaxSec);
+        state.walk.note = 'Не смог открыть «' + target.label + '»: ' + nav.error;
+      }
+      return 'skip';
+    }
+    return 'read';
+  }
+
+  /** Проход прочитан — считаем его и планируем паузу перед следующим переходом. */
+  function walkCountRead() {
+    if (!state.settings.autoWalk) return;
+    state.walk.reads++;
+    if (state.walk.reads >= state.settings.walkReadsPerChat) {
+      state.walk.nextAt = Date.now() + core.walkPauseMs(state.settings.walkMinSec, state.settings.walkMaxSec);
     }
   }
 
@@ -1724,6 +2362,19 @@
       render();
       await postHeartbeat();
       return;
+    }
+
+    // автообход: сам открывает следующий чат/рум из белого списка
+    if (state.settings.autoWalk) {
+      const step = await walkStep();
+      if (step !== 'read') {
+        state.status = state.walk.note || 'обход';
+        state.unreadable = false;
+        await persist();
+        render();
+        await postHeartbeat();
+        return;
+      }
     }
 
     const chat = dom.readChatInfo(document, window.location);
@@ -1817,6 +2468,8 @@
       recent: state.recent.slice(0, 12),
     };
 
+    walkCountRead();
+
     if (!fresh.length) {
       state.status = `чат «${chat.title}»${chat.topicId != null ? ', рум ' + chat.topicId : ''}: ` +
         `прочитано ${harvested.messages.length}, нового нет`;
@@ -1881,6 +2534,17 @@
       restartTimer(); // интервал мог измениться
     }
     if (typeof cfg.paused === 'boolean') state.settings.paused = cfg.paused;
+    // автообход: панель может включить/выключить и задать темп переходов
+    if (typeof cfg.autoWalk === 'boolean') state.settings.autoWalk = cfg.autoWalk;
+    const walkLimits = {
+      walkReadsPerChat: [1, 20], walkMinSec: [10, 3600], walkMaxSec: [10, 7200],
+      walkMaxPerHour: [1, 600], walkIdleGuardSec: [0, 1800],
+    };
+    for (const key in walkLimits) {
+      if (cfg[key] == null) continue;
+      const range = walkLimits[key];
+      state.settings[key] = core.clamp(Math.round(Number(cfg[key]) || range[0]), range[0], range[1]);
+    }
     state.configFromServer = true;
     state.configError = null;
     if (JSON.stringify(state.settings) !== before) { await persist(); render(); }
@@ -1904,8 +2568,9 @@
           status: state.status,
           error: state.error,
           pending: state.pending.length,
-      recent: state.recent.slice(0, 40),
           unreadable: state.unreadable,
+          // автообход: где сейчас, куда дальше, сколько переходов в час
+          walk: walkPublic(),
           whitelist: state.settings.whitelist,
           intervalSec: state.settings.intervalSec,
           paused: state.settings.paused,
@@ -2026,6 +2691,52 @@
       }
     }
 
+    // Автообход: где сейчас, куда дальше, сколько переходов и чем они кончились
+    const walk = walkPublic();
+    if (walk.on || walk.log.length) {
+      body.append(el('div', {
+        class: 'pk-sec',
+        onclick: () => { state.ui.showWalk = !state.ui.showWalk; render(); },
+      }, [
+        el('span', { text: 'Обход чатов: ' + (walk.on ? 'включён' : 'выключен') }),
+        el('span', { class: 'pk-muted', text: state.ui.showWalk ? 'скрыть' : 'показать' }),
+      ]));
+      if (state.ui.showWalk) {
+        if (walk.on) {
+          body.append(el('div', { class: 'pk-row' }, [
+            el('span', { class: 'pk-muted', text: 'сейчас' }),
+            el('span', { text: walk.switching ? 'открываю ' + walk.switching : (walk.current || '—') }),
+          ]));
+          body.append(el('div', { class: 'pk-row' }, [
+            el('span', { class: 'pk-muted', text: 'дальше' }), el('span', { text: walk.next || '—' }),
+          ]));
+          body.append(el('div', { class: 'pk-row' }, [
+            el('span', { class: 'pk-muted', text: 'переход через' }),
+            el('span', { text: walk.nextInSec ? walk.nextInSec + ' с' : 'как дочитаю чат' }),
+          ]));
+          body.append(el('div', { class: 'pk-row' }, [
+            el('span', { class: 'pk-muted', text: 'переходов за час' }),
+            el('span', { text: walk.switchesHour + ' из ' + walk.switchesLimit }),
+          ]));
+        }
+        if (walk.note) body.append(el('div', { class: 'pk-muted', style: 'padding:2px 0', text: walk.note }));
+        for (const rec of walk.log.slice(0, 8)) {
+          const cls = rec.ok === false ? 'pk-badge' : (rec.ok ? 'pk-badge ok' : 'pk-badge sent');
+          const label = rec.ok === false ? '✖ не открылся' : (rec.ok ? '✔ открыт' : '→ переход');
+          body.append(el('div', { class: 'pk-rec' }, [
+            el('div', { class: 'pk-rec-top' }, [
+              el('span', { class: cls, text: label }),
+              el('span', { class: 'pk-rec-text', text: rec.label }),
+            ]),
+            rec.note ? el('div', { class: 'pk-rec-meta', text: rec.note }) : null,
+          ]));
+        }
+        if (!walk.log.length) {
+          body.append(el('div', { class: 'pk-muted', style: 'padding:4px 0', text: 'Переходов ещё не было.' }));
+        }
+      }
+    }
+
     // Журнал разбора: видно каждое сообщение, которое расширение прочитало,
     // вердикт, причину и ссылку на первоисточник (чтобы открыть и переслать).
     body.append(el('div', {
@@ -2079,6 +2790,25 @@
         text: state.settings.paused ? 'Продолжить' : 'Пауза',
         onclick: async () => {
           state.settings.paused = !state.settings.paused;
+          await persist();
+          render();
+        },
+      }),
+      el('button', {
+        class: 'pk-btn',
+        text: state.settings.autoWalk ? 'Обход: выключить' : 'Обход: включить',
+        title: 'Расширение само открывает чаты и румы из белого списка со случайными паузами',
+        onclick: async () => {
+          state.settings.autoWalk = !state.settings.autoWalk;
+          if (state.settings.autoWalk) {
+            // стартуем с того чата, который открыт сейчас (если он в плане)
+            const plan = core.walkTargets(state.settings.whitelist);
+            const here = core.walkIndexForChat(plan, dom.readChatInfo(document, window.location));
+            state.walk.index = here >= 0 ? here : 0;
+            state.walk.reads = 0;
+            state.walk.nextAt = 0;
+          }
+          state.status = state.settings.autoWalk ? 'обход включён' : 'обход выключен';
           await persist();
           render();
         },
@@ -2162,6 +2892,8 @@
       settings: Object.assign({}, state.settings, { token: state.settings.token ? '***' : '' }),
       counters: state.counters,
       pending: state.pending.length,
+      recent: state.recent.slice(0, 40),
+      walk: walkPublic(),
       status: state.status,
       error: state.error,
       diagnostic: state.lastDiagnostic,
@@ -2178,6 +2910,7 @@
     if (!core || !dom) { boot.ok = false; try { render(); } catch { /* панель не важна */ } return; }
     boot.ok = true;
     await loadState();
+    watchUserActivity();
     render();
     restartTimer();
     await persist();          // отметка «расширение живо в этой вкладке»
